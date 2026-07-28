@@ -27,10 +27,12 @@
     ],
     "artifactName": "${productName}-Windows-${version}-Setup.${ext}",
     "icon": "public/logo.svg",
-    "signingHashAlgorithms": ["sha256"],
-    "signDlls": true,
-    "rfc3161TimeStampServer": "http://timestamp.digicert.com",
-    "timeStampServer": "http://timestamp.digicert.com"
+    "signExts": [".dll"],
+    "signtoolOptions": {
+      "signingHashAlgorithms": ["sha256"],
+      "rfc3161TimeStampServer": "http://timestamp.digicert.com",
+      "timeStampServer": "http://timestamp.digicert.com"
+    }
   },
   "nsis": {
     "oneClick": false,
