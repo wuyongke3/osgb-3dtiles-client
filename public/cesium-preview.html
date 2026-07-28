@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' https://cesium.com https://assets.cesium.com blob: data:; worker-src 'self' blob: 'unsafe-inline' https://cesium.com https://assets.cesium.com; connect-src * blob: data:;" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' blob: data:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'self' blob:; connect-src 'self' blob: data:; font-src 'self' data:;" />
   <title>3D Tiles 预览 - Cesium</title>
-  <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Widgets/widgets.css" />
+  <link rel="stylesheet" href="/cesium/Widgets/widgets.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body, #cesiumContainer {
@@ -36,6 +36,93 @@
       display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 13px; font-weight: 500;
       background: rgba(74,144,217,0.2); color: #5da0e8; border: 1px solid rgba(74,144,217,0.4);
     }
+    .status-toggle {
+      border: 1px solid rgba(121,148,178,0.36);
+      border-radius: 6px;
+      background: rgba(16,25,35,0.72);
+      color: #d8e6f3;
+      padding: 4px 10px;
+      font-family: 'Segoe UI','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .status-toggle:hover { background: rgba(35,53,72,0.82); }
+
+    .tile-status-panel {
+      position: absolute; top: 58px; right: 20px; z-index: 11;
+      width: min(380px, calc(100vw - 40px));
+      padding: 14px 16px 16px;
+      border: 1px solid rgba(121,148,178,0.28);
+      border-radius: 8px;
+      background: rgba(10,17,26,0.86);
+      box-shadow: 0 16px 40px rgba(0,0,0,0.32);
+      color: #d9e7f4;
+      font-family: 'Segoe UI','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+      backdrop-filter: blur(8px);
+    }
+    .tile-status-panel.hidden { display: none; }
+    .status-header {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; margin-bottom: 12px;
+      font-size: 14px; font-weight: 600;
+    }
+    .status-pill {
+      flex: 0 0 auto;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(74,144,217,0.18);
+      border: 1px solid rgba(74,144,217,0.38);
+      color: #76b7ff;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .status-pill.warning {
+      background: rgba(226,154,57,0.18);
+      border-color: rgba(226,154,57,0.45);
+      color: #ffc46f;
+    }
+    .status-pill.error {
+      background: rgba(224,85,85,0.18);
+      border-color: rgba(224,85,85,0.45);
+      color: #ff8f8f;
+    }
+    .status-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 14px;
+      margin-bottom: 12px;
+      font-size: 13px;
+    }
+    .status-item {
+      display: flex; justify-content: space-between; gap: 10px;
+      border-bottom: 1px solid rgba(121,148,178,0.14);
+      padding-bottom: 5px;
+    }
+    .status-label { color: #8ca2b8; }
+    .status-value {
+      color: #f2f7fc;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+    .status-message {
+      color: #b8c8d8;
+      font-size: 13px;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+    .last-error {
+      display: none;
+      margin-top: 10px;
+      padding: 9px 10px;
+      border-radius: 6px;
+      background: rgba(224,85,85,0.12);
+      border: 1px solid rgba(224,85,85,0.32);
+      color: #ffc6c6;
+      font-size: 12px;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+    .last-error.show { display: block; }
 
     .loading-overlay {
       position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 20;
@@ -60,6 +147,26 @@
       font-size: 16px; border-radius: 8px; display: none;
     }
     .error-banner.show { display: block; }
+    .error-banner.warning { background: rgba(226,154,57,0.94); }
+    @media (max-width: 700px) {
+      .preview-topbar {
+        align-items: flex-start;
+        gap: 8px;
+        padding: 10px 12px;
+      }
+      .preview-info {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+      .tile-status-panel {
+        top: 78px;
+        right: 12px;
+        left: 12px;
+        width: auto;
+      }
+      .status-grid { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -70,17 +177,40 @@
     <span class="preview-info">
       <span class="preview-badge" id="tilesetLabel">加载中...</span>
       <span id="coordLabel"></span>
+      <button class="status-toggle" id="statusToggle" type="button">隐藏状态</button>
     </span>
+  </div>
+
+  <div class="tile-status-panel" id="tileStatusPanel">
+    <div class="status-header">
+      <span>实时瓦片加载</span>
+      <span class="status-pill" id="loadState">初始化</span>
+    </div>
+    <div class="status-grid">
+      <div class="status-item"><span class="status-label">网络请求</span><span class="status-value" id="networkValue">0 / 0</span></div>
+      <div class="status-item"><span class="status-label">请求失败</span><span class="status-value" id="networkFailedValue">0</span></div>
+      <div class="status-item"><span class="status-label">瓦片排队</span><span class="status-value" id="pendingValue">0</span></div>
+      <div class="status-item"><span class="status-label">处理中</span><span class="status-value" id="processingValue">0</span></div>
+      <div class="status-item"><span class="status-label">已载入</span><span class="status-value" id="loadedValue">0</span></div>
+      <div class="status-item"><span class="status-label">当前可见</span><span class="status-value" id="visibleValue">0</span></div>
+      <div class="status-item"><span class="status-label">瓦片失败</span><span class="status-value" id="failedValue">0</span></div>
+      <div class="status-item"><span class="status-label">最后活动</span><span class="status-value" id="activityValue">0s</span></div>
+    </div>
+    <div class="status-message" id="statusMessage">等待 Cesium 脚本加载...</div>
+    <div class="last-error" id="lastError"></div>
   </div>
 
   <div class="loading-overlay" id="loadingOverlay">
     <div class="loading-spinner"></div>
-    <span>正在加载 3D Tiles ...</span>
+    <span id="loadingText">正在加载 3D Tiles ...</span>
   </div>
 
   <div class="error-banner" id="errorBanner"></div>
 
-  <script src="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Cesium.js"></script>
+  <script>
+    window.CESIUM_BASE_URL = '/cesium/'
+  </script>
+  <script src="/cesium/Cesium.js"></script>
   <script>
     // Read params: first try URL query string, then fallback to server-injected __PREVIEW_PARAMS__
     var params = new URLSearchParams(window.location.search)
@@ -94,15 +224,194 @@
 
     var errorBanner = document.getElementById('errorBanner')
     var loadingOverlay = document.getElementById('loadingOverlay')
+    var loadingText = document.getElementById('loadingText')
     var tilesetLabel = document.getElementById('tilesetLabel')
     var coordLabel = document.getElementById('coordLabel')
+    var statusToggle = document.getElementById('statusToggle')
+    var tileStatusPanel = document.getElementById('tileStatusPanel')
+    var loadState = document.getElementById('loadState')
+    var networkValue = document.getElementById('networkValue')
+    var networkFailedValue = document.getElementById('networkFailedValue')
+    var pendingValue = document.getElementById('pendingValue')
+    var processingValue = document.getElementById('processingValue')
+    var loadedValue = document.getElementById('loadedValue')
+    var visibleValue = document.getElementById('visibleValue')
+    var failedValue = document.getElementById('failedValue')
+    var activityValue = document.getElementById('activityValue')
+    var statusMessage = document.getElementById('statusMessage')
+    var lastError = document.getElementById('lastError')
+
+    var tileStats = {
+      phase: '初始化',
+      pendingRequests: 0,
+      tilesProcessing: 0,
+      loadedTiles: 0,
+      failedTiles: 0,
+      visibleTiles: 0,
+      networkTotal: 0,
+      networkPending: 0,
+      networkFailed: 0,
+      lastActivityAt: Date.now(),
+      lastError: '',
+      lastUrl: '',
+    }
+    var statusRenderQueued = false
+    var visibleTilesThisFrame = 0
+    var cesiumLoadTimer = null
+
+    function isTileAssetUrl(url) {
+      var text = String(url || '')
+      try {
+        var parsed = new URL(text, window.location.href)
+        if (parsed.pathname.indexOf('/cesium/') === 0) {
+          return false
+        }
+      } catch (e) {}
+      return /\.(json|b3dm|i3dm|pnts|cmpt|glb|gltf|bin)(\?|#|$)/i.test(text)
+    }
+
+    function compactUrl(url) {
+      var text = String(url || '')
+      try {
+        var parsed = new URL(text, window.location.href)
+        text = parsed.pathname + parsed.search
+      } catch (e) {}
+      if (text.length > 120) {
+        text = '...' + text.slice(-117)
+      }
+      return text
+    }
+
+    function markActivity() {
+      tileStats.lastActivityAt = Date.now()
+    }
+
+    function setPhase(phase, message) {
+      tileStats.phase = phase
+      if (message) {
+        statusMessage.textContent = message
+      }
+      requestStatusRender()
+    }
+
+    function recordError(message, url) {
+      tileStats.lastError = message || '未知错误'
+      tileStats.lastUrl = url ? compactUrl(url) : ''
+      requestStatusRender()
+    }
+
+    function requestStatusRender() {
+      if (statusRenderQueued) return
+      statusRenderQueued = true
+      requestAnimationFrame(renderStatus)
+    }
+
+    function renderStatus() {
+      statusRenderQueued = false
+      var hasFailures = tileStats.failedTiles > 0 || tileStats.networkFailed > 0
+      var isActive = tileStats.pendingRequests > 0 || tileStats.tilesProcessing > 0 || tileStats.networkPending > 0
+      loadState.textContent = tileStats.phase
+      loadState.className = 'status-pill' + (hasFailures ? ' error' : (isActive ? ' warning' : ''))
+      networkValue.textContent = tileStats.networkPending + ' / ' + tileStats.networkTotal
+      networkFailedValue.textContent = String(tileStats.networkFailed)
+      pendingValue.textContent = String(tileStats.pendingRequests)
+      processingValue.textContent = String(tileStats.tilesProcessing)
+      loadedValue.textContent = String(tileStats.loadedTiles)
+      visibleValue.textContent = String(tileStats.visibleTiles)
+      failedValue.textContent = String(tileStats.failedTiles)
+      activityValue.textContent = Math.max(0, Math.round((Date.now() - tileStats.lastActivityAt) / 1000)) + 's'
+
+      if (tileStats.lastError) {
+        lastError.textContent = '最近错误: ' + tileStats.lastError + (tileStats.lastUrl ? ' | ' + tileStats.lastUrl : '')
+        lastError.classList.add('show')
+      } else {
+        lastError.classList.remove('show')
+      }
+    }
+
+    function trackNetworkStart(url) {
+      if (!isTileAssetUrl(url)) return false
+      tileStats.networkTotal += 1
+      tileStats.networkPending += 1
+      markActivity()
+      requestStatusRender()
+      return true
+    }
+
+    function trackNetworkEnd(url, ok, status, statusText) {
+      if (!isTileAssetUrl(url)) return
+      tileStats.networkPending = Math.max(0, tileStats.networkPending - 1)
+      if (!ok) {
+        tileStats.networkFailed += 1
+        recordError((status || '请求失败') + (statusText ? ' ' + statusText : ''), url)
+      }
+      markActivity()
+      requestStatusRender()
+    }
+
+    function installNetworkMonitor() {
+      if (window.fetch) {
+        var nativeFetch = window.fetch.bind(window)
+        window.fetch = function (input, init) {
+          var url = typeof input === 'string' ? input : (input && input.url)
+          var tracked = trackNetworkStart(url)
+          return nativeFetch(input, init).then(function (response) {
+            if (tracked) {
+              trackNetworkEnd(url, response.ok, response.status, response.statusText)
+            }
+            return response
+          }).catch(function (err) {
+            if (tracked) {
+              trackNetworkEnd(url, false, '网络异常', err && err.message ? err.message : String(err))
+            }
+            throw err
+          })
+        }
+      }
+
+      var NativeXHR = window.XMLHttpRequest
+      if (NativeXHR) {
+        window.XMLHttpRequest = function () {
+          var xhr = new NativeXHR()
+          var trackedUrl = ''
+          var tracked = false
+          var nativeOpen = xhr.open
+          xhr.open = function (method, url) {
+            trackedUrl = url
+            tracked = trackNetworkStart(url)
+            return nativeOpen.apply(xhr, arguments)
+          }
+          xhr.addEventListener('loadend', function () {
+            if (tracked) {
+              trackNetworkEnd(trackedUrl, xhr.status >= 200 && xhr.status < 400, xhr.status, xhr.statusText)
+            }
+          })
+          return xhr
+        }
+      }
+    }
+
+    statusToggle.addEventListener('click', function () {
+      var hidden = tileStatusPanel.classList.toggle('hidden')
+      statusToggle.textContent = hidden ? '显示状态' : '隐藏状态'
+    })
 
     coordLabel.textContent = '中心: ' + centerX.toFixed(6) + '°, ' + centerY.toFixed(6) + '°'
 
     function showError(msg) {
       errorBanner.textContent = '加载失败: ' + msg
+      errorBanner.classList.remove('warning')
       errorBanner.classList.add('show')
       loadingOverlay.classList.add('hidden')
+      setPhase('失败', msg)
+      recordError(msg, tilesetUrl)
+    }
+
+    function showWarning(msg) {
+      errorBanner.textContent = msg
+      errorBanner.classList.add('warning')
+      errorBanner.classList.add('show')
+      setPhase('等待显示', msg)
     }
 
     if (!tilesetUrl) {
@@ -113,23 +422,44 @@
     if (tilesetUrl && !/^https?:\/\//i.test(tilesetUrl)) {
       tilesetUrl = new URL(tilesetUrl, window.location.href).href
     }
+    installNetworkMonitor()
 
     // Wait for Cesium to be fully loaded
     function waitForCesium(cb) {
       if (typeof Cesium !== 'undefined' && Cesium.Viewer && Cesium.Cesium3DTileset && Cesium.Cesium3DTileset.fromUrl) {
+        if (cesiumLoadTimer) {
+          clearTimeout(cesiumLoadTimer)
+        }
         cb()
       } else {
         setTimeout(function () { waitForCesium(cb) }, 100)
       }
     }
 
+    function onCesiumScriptError() {
+      showError('本地 Cesium 脚本加载失败，请检查 public/cesium 是否完整打包')
+    }
+
+    cesiumLoadTimer = setTimeout(function () {
+      if (typeof Cesium === 'undefined') {
+        showError('本地 Cesium 脚本超过 12 秒未加载，请检查 /cesium/Cesium.js 是否可访问')
+      }
+    }, 12000)
+    window.addEventListener('error', function (event) {
+      var target = event.target || event.srcElement
+      if (target && target.tagName === 'SCRIPT' && /Cesium\.js/i.test(target.src || '')) {
+        onCesiumScriptError()
+      }
+    }, true)
+    setInterval(requestStatusRender, 1000)
+
     waitForCesium(function () {
       try {
-        Cesium.Ion.defaultAccessToken =
-          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJlYWE1OWUxNy1mMWZiLTQzYjYtYTQ0OS1kMWFjYmFkNjc5YzciLCJpZCI6NTc3MzMsImlhdCI6MTYyNzg0NTE4MH0.XcKpgANiY19MC4bdFUXMVEBToBmqS8kuYpUlxJHYZxk'
+        setPhase('创建场景', 'Cesium 已加载，正在创建预览场景...')
 
-        // Create viewer WITHOUT terrain (avoid Cesium Ion dependency for terrain)
+        // Create viewer without online imagery or terrain.
         var viewer = new Cesium.Viewer('cesiumContainer', {
+          baseLayer: false,
           baseLayerPicker: false,
           geocoder: false,
           homeButton: false,
@@ -151,8 +481,18 @@
 
         // Enable depth test
         viewer.scene.globe.depthTestAgainstTerrain = true
+        viewer.scene.renderError.addEventListener(function (scene, err) {
+          showError('渲染失败: ' + (err && err.message ? err.message : String(err)))
+        })
+
+        viewer.scene.postRender.addEventListener(function () {
+          tileStats.visibleTiles = visibleTilesThisFrame
+          visibleTilesThisFrame = 0
+          requestStatusRender()
+        })
 
         // Load 3D Tiles via Cesium3DTileset.fromUrl (new Cesium3DTileset is deprecated since 1.104)
+        setPhase('请求 tileset', '正在请求 tileset.json: ' + compactUrl(tilesetUrl))
         Cesium.Cesium3DTileset.fromUrl(tilesetUrl, {
           maximumScreenSpaceError: 16,
           skipLevelOfDetail: true,
@@ -164,6 +504,45 @@
         })
           .then(function (tileset) {
             viewer.scene.primitives.add(tileset)
+            setPhase('加载瓦片', 'tileset.json 已载入，正在请求首屏瓦片...')
+
+            tileset.loadProgress.addEventListener(function (numberOfPendingRequests, numberOfTilesProcessing) {
+              tileStats.pendingRequests = numberOfPendingRequests
+              tileStats.tilesProcessing = numberOfTilesProcessing
+              markActivity()
+              if (numberOfPendingRequests > 0 || numberOfTilesProcessing > 0) {
+                setPhase('加载中', '瓦片正在加载，白屏时请观察失败数和最近错误。')
+              } else if (tileStats.loadedTiles > 0) {
+                setPhase('空闲', '当前视角瓦片请求已结束。')
+              }
+            })
+
+            tileset.tileLoad.addEventListener(function () {
+              tileStats.loadedTiles += 1
+              markActivity()
+              requestStatusRender()
+            })
+
+            tileset.tileVisible.addEventListener(function () {
+              visibleTilesThisFrame += 1
+            })
+
+            tileset.tileFailed.addEventListener(function (error) {
+              tileStats.failedTiles += 1
+              markActivity()
+              recordError(error && error.message ? error.message : '瓦片加载失败', error && error.url)
+              setPhase('有失败', '检测到瓦片加载失败，请查看最近错误 URL。')
+            })
+
+            tileset.initialTilesLoaded.addEventListener(function () {
+              loadingOverlay.classList.add('hidden')
+              setPhase('首屏完成', '首屏瓦片已加载。')
+            })
+
+            tileset.allTilesLoaded.addEventListener(function () {
+              loadingOverlay.classList.add('hidden')
+              setPhase('全部完成', '当前视角全部瓦片已加载完成。')
+            })
 
             loadingOverlay.classList.add('hidden')
 
@@ -177,51 +556,48 @@
             coordLabel.textContent =
               '范围: ' + boundingSphere.radius.toFixed(0) + 'm'
 
-            viewer.camera.flyTo({
-              destination: Cesium.Cartesian3.fromDegrees(
-                centerX || (cartographic.longitude * 180 / Math.PI),
-                centerY || (cartographic.latitude * 180 / Math.PI),
-                boundingSphere.radius + 100
+            viewer.camera.flyToBoundingSphere(boundingSphere, {
+              offset: new Cesium.HeadingPitchRange(
+                Cesium.Math.toRadians(0),
+                Cesium.Math.toRadians(-35),
+                Math.max(boundingSphere.radius * 2.2, 200)
               ),
-              orientation: {
-                heading: Cesium.Math.toRadians(0),
-                pitch: Cesium.Math.toRadians(-90),
-                roll: 0,
-              },
               duration: 2.5,
             })
+
+            setTimeout(function () {
+              if (tileStats.loadedTiles === 0 && tileStats.failedTiles === 0 && tileStats.networkFailed === 0) {
+                statusMessage.textContent = '已定位到数据范围，但还没有瓦片载入记录；可缩放或旋转视角触发更多请求。'
+                requestStatusRender()
+              }
+              if (tileStats.visibleTiles === 0) {
+                showWarning('当前画面还没有可见瓦片，已自动按 tileset 范围定位；请查看右上角加载状态。')
+              }
+            }, 9000)
 
             // Keyboard shortcuts
             document.addEventListener('keydown', function (e) {
               var bs = tileset.boundingSphere
               if (e.key === 'r' || e.key === 'R') {
                 if (bs) {
-                  viewer.camera.flyTo({
-                    destination: Cesium.Cartesian3.fromDegrees(
-                      centerX, centerY,
-                      Math.max(bs.radius * 1.8, centerHeight + 500)
+                  viewer.camera.flyToBoundingSphere(bs, {
+                    offset: new Cesium.HeadingPitchRange(
+                      Cesium.Math.toRadians(0),
+                      Cesium.Math.toRadians(-35),
+                      Math.max(bs.radius * 2.2, centerHeight + 500)
                     ),
-                    orientation: {
-                      heading: Cesium.Math.toRadians(0),
-                      pitch: Cesium.Math.toRadians(-35),
-                      roll: 0,
-                    },
                     duration: 2,
                   })
                 }
               }
               if (e.key === 't' || e.key === 'T') {
                 if (bs) {
-                  viewer.camera.flyTo({
-                    destination: Cesium.Cartesian3.fromDegrees(
-                      centerX, centerY,
-                      bs.radius * 2.5
+                  viewer.camera.flyToBoundingSphere(bs, {
+                    offset: new Cesium.HeadingPitchRange(
+                      Cesium.Math.toRadians(0),
+                      Cesium.Math.toRadians(-90),
+                      Math.max(bs.radius * 2.5, 200)
                     ),
-                    orientation: {
-                      heading: Cesium.Math.toRadians(0),
-                      pitch: Cesium.Math.toRadians(-90),
-                      roll: 0,
-                    },
                     duration: 1.5,
                   })
                 }

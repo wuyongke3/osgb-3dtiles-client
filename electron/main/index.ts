@@ -140,6 +140,9 @@ const MIME_TYPES: Record<string, string> = {
   '.js': 'application/javascript',
   '.html': 'text/html',
   '.xml': 'application/xml',
+  '.wasm': 'application/wasm',
+  '.ktx2': 'image/ktx2',
+  '.basis': 'application/octet-stream',
 }
 
 function findFreePort(): Promise<number> {
@@ -157,6 +160,22 @@ function findFreePort(): Promise<number> {
       }
     })
   })
+}
+
+function getCesiumPath(): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'cesium')
+  }
+  return path.join(process.env.APP_ROOT!, 'public', 'cesium')
+}
+
+function resolveServedFile(rootDir: string, urlPath: string): string | null {
+  const filePath = path.normalize(path.join(rootDir, urlPath))
+  const relative = path.relative(rootDir, filePath)
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    return null
+  }
+  return filePath
 }
 
 function startStaticServer(serveDir: string, port: number): Promise<http.Server> {
@@ -187,10 +206,15 @@ function startStaticServer(serveDir: string, port: number): Promise<http.Server>
         urlPath = '/tileset.json'
       }
 
-      const filePath = path.join(serveDir, urlPath)
+      const cesiumPrefix = '/cesium/'
+      const serveRoot = urlPath.startsWith(cesiumPrefix) ? getCesiumPath() : serveDir
+      const relativePath = urlPath.startsWith(cesiumPrefix)
+        ? urlPath.slice(cesiumPrefix.length)
+        : urlPath.slice(1)
+      const filePath = resolveServedFile(serveRoot, relativePath)
 
       // Check file exists
-      if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+      if (!filePath || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
         res.writeHead(404)
         res.end('Not Found')
         return

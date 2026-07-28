@@ -15,6 +15,10 @@
     {
       "from": "public/cesium-preview.html",
       "to": "cesium-preview.html"
+    },
+    {
+      "from": "public/cesium",
+      "to": "cesium"
     }
   ],
   "electronDist": "node_modules/electron/dist",
