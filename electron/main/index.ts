@@ -50,6 +50,15 @@ interface MetadataInfo {
   version: string | null
 }
 
+interface OsgbMergeInfo {
+  inputDir: string
+  tempDir: string
+  baseTileCount: number
+  updateTileCount: number
+  replacedTileCount: number
+  addedTileCount: number
+}
+
 function parseMetadataXml(filePath: string): MetadataInfo | null {
   try {
     if (!fs.existsSync(filePath)) return null
@@ -106,6 +115,172 @@ function validateOsgbStructure(dirPath: string): { valid: boolean; message: stri
   } catch {
     return { valid: false, message: '无法读取 Data 目录内容' }
   }
+}
+
+function sameMetadataValue(a: string | null, b: string | null): boolean {
+  return !a || !b || a === b
+}
+
+function sameSrsOrigin(
+  a: MetadataInfo['srsOrigin'],
+  b: MetadataInfo['srsOrigin'],
+): boolean {
+  if (!a || !b) return true
+  const tolerance = 1e-7
+  return (
+    Math.abs(a.x - b.x) <= tolerance &&
+    Math.abs(a.y - b.y) <= tolerance &&
+    Math.abs(a.z - b.z) <= tolerance
+  )
+}
+
+function safeRemoveInside(rootDir: string, targetPath: string): void {
+  const relative = path.relative(rootDir, targetPath)
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error(`拒绝删除临时目录之外的路径: ${targetPath}`)
+  }
+  removeTempEntry(targetPath)
+}
+
+function removeTempEntry(targetPath: string): void {
+  if (!fs.existsSync(targetPath)) return
+  const stat = fs.lstatSync(targetPath)
+  if (stat.isSymbolicLink() || stat.isFile()) {
+    fs.unlinkSync(targetPath)
+    return
+  }
+  if (stat.isDirectory()) {
+    for (const entry of fs.readdirSync(targetPath)) {
+      removeTempEntry(path.join(targetPath, entry))
+    }
+    fs.rmdirSync(targetPath)
+    return
+  }
+  fs.rmSync(targetPath, { force: true })
+}
+
+function linkOrCopyDirectory(sourcePath: string, targetPath: string): void {
+  try {
+    fs.symlinkSync(sourcePath, targetPath, 'junction')
+  } catch {
+    fs.cpSync(sourcePath, targetPath, { recursive: true })
+  }
+}
+
+function copyOrLinkEntry(sourcePath: string, targetPath: string): void {
+  const stat = fs.statSync(sourcePath)
+  if (stat.isDirectory()) {
+    linkOrCopyDirectory(sourcePath, targetPath)
+  } else if (stat.isFile()) {
+    fs.copyFileSync(sourcePath, targetPath)
+  }
+}
+
+function listOsgbTileDirs(dataDir: string): string[] {
+  return fs.readdirSync(dataDir).filter((entry) => {
+    const tilePath = path.join(dataDir, entry)
+    return fs.statSync(tilePath).isDirectory()
+  })
+}
+
+function normalizeUpdateDirs(inputDir: string, updateDirs?: string[]): string[] {
+  const normalizedInput = path.resolve(inputDir).toLowerCase()
+  const seen = new Set<string>()
+  const result: string[] = []
+
+  for (const dir of updateDirs ?? []) {
+    if (!dir) continue
+    const resolved = path.resolve(dir)
+    const key = resolved.toLowerCase()
+    if (key === normalizedInput || seen.has(key)) continue
+    seen.add(key)
+    result.push(resolved)
+  }
+
+  return result
+}
+
+function assertCompatibleMetadata(baseDir: string, updateDir: string): void {
+  const baseMetadata = parseMetadataXml(path.join(baseDir, 'metadata.xml'))
+  const updateMetadata = parseMetadataXml(path.join(updateDir, 'metadata.xml'))
+  if (!baseMetadata || !updateMetadata) return
+
+  if (!sameMetadataValue(baseMetadata.srs, updateMetadata.srs)) {
+    throw new Error(`小范围 OSGB 坐标系与大范围不一致: ${updateDir}`)
+  }
+
+  if (!sameSrsOrigin(baseMetadata.srsOrigin, updateMetadata.srsOrigin)) {
+    throw new Error(`小范围 OSGB 原点与大范围不一致，第一版暂不支持直接合并: ${updateDir}`)
+  }
+}
+
+function createMergedOsgbInput(inputDir: string, updateDirs: string[]): OsgbMergeInfo {
+  const baseValidation = validateOsgbStructure(inputDir)
+  if (!baseValidation.valid) {
+    throw new Error(`大范围 OSGB 无效: ${baseValidation.message}`)
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'osgb-merge-'))
+  const tempDataDir = path.join(tempDir, 'Data')
+  fs.mkdirSync(tempDataDir, { recursive: true })
+
+  try {
+    for (const entry of fs.readdirSync(inputDir)) {
+      if (entry.toLowerCase() === 'data') continue
+      copyOrLinkEntry(path.join(inputDir, entry), path.join(tempDir, entry))
+    }
+
+    const baseDataDir = path.join(inputDir, 'Data')
+    const baseTileDirs = listOsgbTileDirs(baseDataDir)
+    for (const tileName of baseTileDirs) {
+      linkOrCopyDirectory(path.join(baseDataDir, tileName), path.join(tempDataDir, tileName))
+    }
+
+    let updateTileCount = 0
+    let replacedTileCount = 0
+    let addedTileCount = 0
+
+    for (const updateDir of updateDirs) {
+      const updateValidation = validateOsgbStructure(updateDir)
+      if (!updateValidation.valid) {
+        throw new Error(`小范围 OSGB 无效: ${updateDir}，${updateValidation.message}`)
+      }
+      assertCompatibleMetadata(inputDir, updateDir)
+
+      const updateDataDir = path.join(updateDir, 'Data')
+      const updateTileDirs = listOsgbTileDirs(updateDataDir)
+      for (const tileName of updateTileDirs) {
+        const targetTileDir = path.join(tempDataDir, tileName)
+        if (fs.existsSync(targetTileDir)) {
+          safeRemoveInside(tempDir, targetTileDir)
+          replacedTileCount++
+        } else {
+          addedTileCount++
+        }
+        linkOrCopyDirectory(path.join(updateDataDir, tileName), targetTileDir)
+        updateTileCount++
+      }
+    }
+
+    return {
+      inputDir: tempDir,
+      tempDir,
+      baseTileCount: baseTileDirs.length,
+      updateTileCount,
+      replacedTileCount,
+      addedTileCount,
+    }
+  } catch (err) {
+    cleanupMergedOsgbInput(tempDir)
+    throw err
+  }
+}
+
+function cleanupMergedOsgbInput(tempDir: string | null): void {
+  if (!tempDir) return
+  try {
+    removeTempEntry(tempDir)
+  } catch {}
 }
 
 // ─── Conversion state ─────────────────────────────────────────────────
@@ -376,6 +551,7 @@ ipcMain.handle('start-conversion', async (event, params: {
   inputDir: string
   outputDir: string
   config: { x?: number | string; y?: number | string; offset?: number; max_lvl?: number; pbr?: boolean }
+  updateDirs?: string[]
 }) => {
   const { inputDir, outputDir, config } = params
 
@@ -412,10 +588,33 @@ ipcMain.handle('start-conversion', async (event, params: {
 
   isCancelled = false
 
+  let conversionInputDir = inputDir
+  let tempMergeDir: string | null = null
+  const updateDirs = normalizeUpdateDirs(inputDir, params.updateDirs)
+
+  if (updateDirs.length > 0) {
+    try {
+      event.sender.send('conversion-stdout', `开始合并 OSGB 更新目录，共 ${updateDirs.length} 个\n`)
+      const mergeInfo = createMergedOsgbInput(inputDir, updateDirs)
+      conversionInputDir = mergeInfo.inputDir
+      tempMergeDir = mergeInfo.tempDir
+      event.sender.send(
+        'conversion-stdout',
+        `OSGB 合并完成: 大范围瓦片 ${mergeInfo.baseTileCount} 个，更新瓦片 ${mergeInfo.updateTileCount} 个，替换 ${mergeInfo.replacedTileCount} 个，新增 ${mergeInfo.addedTileCount} 个\n`,
+      )
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      event.sender.send('conversion-stderr', `OSGB 合并失败: ${message}`)
+      event.sender.send('conversion-status', 'error')
+      cleanupMergedOsgbInput(tempMergeDir)
+      return { success: false, error: `OSGB 合并失败: ${message}` }
+    }
+  }
+
   return new Promise<{ success: boolean; error?: string }>((resolve) => {
     try {
       conversionProcess = spawn(exePath, [
-        '-i', inputDir,
+        '-i', conversionInputDir,
         '-o', outputDir,
         '-f', 'osgb',
         '-c', configJson,
@@ -445,6 +644,7 @@ ipcMain.handle('start-conversion', async (event, params: {
       // Handle process exit
       conversionProcess.on('close', (code) => {
         conversionProcess = null
+        cleanupMergedOsgbInput(tempMergeDir)
         if (isCancelled) {
           event.sender.send('conversion-status', 'cancelled')
           resolve({ success: false, error: '转换已取消' })
@@ -460,6 +660,7 @@ ipcMain.handle('start-conversion', async (event, params: {
       // Handle process error
       conversionProcess.on('error', (err) => {
         conversionProcess = null
+        cleanupMergedOsgbInput(tempMergeDir)
         const message = err.message.includes('ENOENT')
           ? `无法启动转换工具: ${exePath}，请确认文件存在`
           : `启动转换进程失败: ${err.message}`
@@ -470,6 +671,7 @@ ipcMain.handle('start-conversion', async (event, params: {
 
       event.sender.send('conversion-status', 'running')
     } catch (err: unknown) {
+      cleanupMergedOsgbInput(tempMergeDir)
       const message = err instanceof Error ? err.message : String(err)
       event.sender.send('conversion-status', 'error')
       resolve({ success: false, error: `启动转换失败: ${message}` })

@@ -111,6 +111,7 @@ const Icon = (props: { name: IconName; size?: number }) =>
 
 const inputDir = ref("");
 const outputDir = ref("");
+const updateDirs = ref<string[]>([]);
 const status = ref<ConversionStatus>("idle");
 const statusMessage = ref("");
 const toolExists = ref(false);
@@ -214,6 +215,34 @@ async function selectOutputDir() {
   }
 }
 
+async function addUpdateDir() {
+  const dir = await window.electronAPI.selectOsgbDir();
+  if (!dir) return;
+
+  if (dir === inputDir.value) {
+    appendLog("小范围更新目录不能和大范围输入目录相同", "err");
+    return;
+  }
+
+  if (updateDirs.value.includes(dir)) {
+    appendLog("该小范围更新目录已添加", "info");
+    return;
+  }
+
+  const result = await window.electronAPI.validateOsgbStructure(dir);
+  if (!result.valid) {
+    appendLog(`小范围更新目录无效: ${result.message}`, "err");
+    return;
+  }
+
+  updateDirs.value.push(dir);
+  appendLog(`已添加小范围更新目录: ${dir}`, "info");
+}
+
+function removeUpdateDir(index: number) {
+  updateDirs.value.splice(index, 1);
+}
+
 async function validateInput() {
   if (!inputDir.value) return;
   const result = await window.electronAPI.validateOsgbStructure(inputDir.value);
@@ -274,6 +303,9 @@ async function startConversion() {
     `配置: x=${config.x || "auto"}, y=${config.y || "auto"}, offset=${config.offset}, max_lvl=${config.max_lvl}, pbr=${config.pbr}`,
     "info",
   );
+  if (updateDirs.value.length > 0) {
+    appendLog(`小范围更新目录: ${updateDirs.value.length} 个`, "info");
+  }
   appendLog("-".repeat(60), "info");
 
   try {
@@ -287,6 +319,7 @@ async function startConversion() {
         max_lvl: config.max_lvl,
         pbr: config.pbr,
       },
+      updateDirs: updateDirs.value,
     });
 
     if (!result.success) {
@@ -443,6 +476,45 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="metadataDetail" class="metadata-detail">
             {{ metadataDetail }}
+          </div>
+        </section>
+
+        <section class="config-section">
+          <div class="section-heading">
+            <Icon name="folderOpen" :size="18" />
+            <h2 class="section-title">小范围更新目录</h2>
+          </div>
+          <div class="update-actions">
+            <button
+              class="btn-outline btn-sm button-with-icon"
+              type="button"
+              :disabled="status === 'running'"
+              @click="addUpdateDir"
+            >
+              <Icon name="folderOpen" :size="16" />
+              新增
+            </button>
+          </div>
+          <div v-if="updateDirs.length === 0" class="update-empty">
+            未添加小范围更新目录
+          </div>
+          <div v-else class="update-list">
+            <div
+              v-for="(dir, index) in updateDirs"
+              :key="dir"
+              class="update-item"
+            >
+              <span class="update-path" :title="dir">{{ dir }}</span>
+              <button
+                class="icon-button update-remove"
+                type="button"
+                title="移除"
+                :disabled="status === 'running'"
+                @click="removeUpdateDir(index)"
+              >
+                <Icon name="x" :size="15" />
+              </button>
+            </div>
           </div>
         </section>
 
@@ -832,6 +904,56 @@ onBeforeUnmount(() => {
 
 .dir-input:hover {
   border-color: var(--color-border-strong);
+}
+
+.update-actions {
+  display: flex;
+}
+
+.update-empty {
+  min-height: 36px;
+  padding: 9px 10px;
+  color: var(--color-text-dim);
+  background: var(--color-surface-raised);
+  border: 1px dashed var(--color-border);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.update-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.update-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 8px 7px 10px;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+
+.update-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.update-remove {
+  width: 28px;
+  height: 28px;
+  border-radius: 5px;
+  flex-shrink: 0;
 }
 
 .validation-msg {

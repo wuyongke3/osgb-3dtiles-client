@@ -31,6 +31,7 @@ export interface ConversionParams {
   inputDir: string
   outputDir: string
   config: ConversionConfig
+  updateDirs?: string[]
 }
 
 export interface ConversionResult {
