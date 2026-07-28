@@ -374,8 +374,7 @@ onBeforeUnmount(() => {
           <Icon name="box" :size="22" />
         </div>
         <div>
-          <h1 class="app-title">OSGB 转 3D Tiles 桌面工作台</h1>
-          <!-- <div class="app-subtitle">OSGB 转 3D Tiles 桌面工作台</div> -->
+          <h1 class="app-title">3DMine(osgb转3dtile工具)</h1>
         </div>
       </div>
 
@@ -613,15 +612,7 @@ onBeforeUnmount(() => {
     </div>
 
     <footer class="app-footer">
-      <span>Powered by fanvanzh/3dtiles</span>
-      <span class="footer-sep">|</span>
-      <span>OSG 3.4.0 + GDAL 2.0.1</span>
-      <span class="footer-sep">|</span>
-      <span v-if="toolExists" class="footer-ok">工具已就绪</span>
-      <span v-else class="footer-err">工具未检测到</span>
-      <span v-if="toolPath" class="tool-path" :title="toolPath">{{
-        toolPath
-      }}</span>
+      <span>&copy;3dmine-cn@2026</span>
     </footer>
   </div>
 </template>
