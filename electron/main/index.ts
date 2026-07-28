@@ -268,8 +268,8 @@ const indexHtml = path.join(RENDERER_DIST, 'index.html')
 
 async function createWindow() {
   win = new BrowserWindow({
-    title: 'OSGB 转 3D Tiles 转换工具',
-    icon: path.join(process.env.VITE_PUBLIC!, 'logo.svg'),
+    title: '3DMine(osgb转3dtile工具)',
+    icon: path.join(process.env.VITE_PUBLIC!, 'logo.png'),
     width: 1200,
     height: 800,
     minWidth: 900,

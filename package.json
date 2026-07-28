@@ -1,9 +1,9 @@
 {
-  "name": "osgb-to-3dtiles",
+  "name": "3dmine-osgb-to-3dtile",
   "version": "1.0.0",
   "main": "dist-electron/main/index.js",
-  "description": "OSGB 转 3D Tiles 桌面端转换工具 - 基于 fanvanzh/3dtiles 引擎",
-  "author": "OSGB Converter Team",
+  "description": "3DMine(osgb转3dtile工具)",
+  "author": "3dmine-cn",
   "license": "MIT",
   "private": true,
   "keywords": [

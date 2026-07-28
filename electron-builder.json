@@ -1,8 +1,8 @@
 {
   "$schema": "./node_modules/app-builder-lib/scheme.json",
-  "appId": "com.osgb2tiles.converter",
+  "appId": "com.3dmine.osgb2tiles.converter",
   "asar": true,
-  "productName": "OSGB 转 3D Tiles 桌面工作台",
+  "productName": "3DMine(osgb转3dtile工具)",
   "directories": {
     "output": "release/${version}"
   },
@@ -30,7 +30,7 @@
       }
     ],
     "artifactName": "${productName}-Windows-${version}-Setup.${ext}",
-    "icon": "public/logo.svg",
+    "icon": "public/logo.png",
     "signExts": [".dll"],
     "signtoolOptions": {
       "signingHashAlgorithms": ["sha256"],
@@ -45,8 +45,8 @@
     "deleteAppDataOnUninstall": false,
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true,
-    "shortcutName": "OSGB 转 3D Tiles",
-    "uninstallDisplayName": "OSGB 转 3D Tiles 转换工具",
+    "shortcutName": "3DMine(osgb转3dtile工具)",
+    "uninstallDisplayName": "3DMine(osgb转3dtile工具)",
     "warningsAsErrors": false
   }
 }
