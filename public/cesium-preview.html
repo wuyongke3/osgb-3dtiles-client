@@ -457,9 +457,10 @@
       try {
         setPhase('创建场景', 'Cesium 已加载，正在创建预览场景...')
 
-        // Create viewer without online imagery or terrain.
+        // Create viewer without online imagery, terrain, or the default globe.
         var viewer = new Cesium.Viewer('cesiumContainer', {
           baseLayer: false,
+          globe: false,
           baseLayerPicker: false,
           geocoder: false,
           homeButton: false,
@@ -479,8 +480,17 @@
           viewer._cesiumWidget._creditContainer.style.display = 'none'
         } catch (e) {}
 
-        // Enable depth test
-        viewer.scene.globe.depthTestAgainstTerrain = true
+        // Keep only the 3D Tiles content visible in the preview scene.
+        viewer.scene.backgroundColor = Cesium.Color.fromCssColorString('#05070a')
+        if (viewer.scene.globe) {
+          viewer.scene.globe.show = false
+          viewer.scene.globe.depthTestAgainstTerrain = true
+        }
+        if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = false
+        if (viewer.scene.skyBox) viewer.scene.skyBox.show = false
+        if (viewer.scene.sun) viewer.scene.sun.show = false
+        if (viewer.scene.moon) viewer.scene.moon.show = false
+
         viewer.scene.renderError.addEventListener(function (scene, err) {
           showError('渲染失败: ' + (err && err.message ? err.message : String(err)))
         })
