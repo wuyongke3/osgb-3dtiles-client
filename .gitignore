@@ -1,0 +1,36 @@
+# ── Dependencies ──
+node_modules/
+
+# ── Build output ──
+dist/
+dist-electron/
+release/
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Electron binary (use local system install) ──
+electron-*.zip
+*.exe
+
+# ── Env ──
+.env
+.env.local
+.env.*.local
+
+# ── Debug logs ──
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── TypeScript cache ──
+*.tsbuildinfo

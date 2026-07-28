@@ -1,0 +1,37 @@
+{
+  "name": "osgb-to-3dtiles",
+  "version": "1.0.0",
+  "main": "dist-electron/main/index.js",
+  "description": "OSGB 转 3D Tiles 桌面端转换工具 - 基于 fanvanzh/3dtiles 引擎",
+  "author": "OSGB Converter Team",
+  "license": "MIT",
+  "private": true,
+  "keywords": [
+    "osgb",
+    "3dtiles",
+    "cesium",
+    "gis",
+    "electron",
+    "vue"
+  ],
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build && electron-builder",
+    "build:vite": "vite build",
+    "build:win": "vue-tsc --noEmit && vite build && cross-env ELECTRON_SKIP_BINARY_DOWNLOAD=1 electron-builder --win --config electron-builder.json",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.7",
+    "cross-env": "^7.0.3",
+    "electron": "^42.1.0",
+    "electron-builder": "^26.8.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "vite-plugin-electron": "^1.0.1",
+    "vite-plugin-electron-renderer": "^1.0.0",
+    "vue": "^3.5.35",
+    "vue-tsc": "^3.3.3"
+  }
+}

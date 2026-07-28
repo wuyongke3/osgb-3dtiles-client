@@ -1,0 +1,158 @@
+:root {
+  --color-bg: #0f1923;
+  --color-surface: #1a2736;
+  --color-surface-hover: #223344;
+  --color-border: #2a3f55;
+  --color-border-focus: #4a90d9;
+  --color-text: #c8d6e5;
+  --color-text-dim: #7a8fa5;
+  --color-text-bright: #e8f0f8;
+  --color-primary: #4a90d9;
+  --color-primary-hover: #5da0e8;
+  --color-success: #34c759;
+  --color-warning: #f0a040;
+  --color-error: #e05555;
+  --color-accent: #6c5ce7;
+  --font-mono: 'Cascadia Code', 'Fira Code', 'Consolas', 'Courier New', monospace;
+  --font-sans: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --radius: 8px;
+  --radius-sm: 5px;
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  font-family: var(--font-sans);
+  font-size: 16px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  overflow: hidden;
+  user-select: none;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+}
+
+input, select, button {
+  font-family: var(--font-sans);
+  font-size: 16px;
+}
+
+input[type="text"],
+input[type="number"] {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-bright);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color 0.2s;
+  width: 100%;
+}
+
+input:focus {
+  border-color: var(--color-border-focus);
+}
+
+label {
+  font-size: 16px;
+  color: var(--color-text-dim);
+  display: block;
+  margin-bottom: 6px;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 10px 22px;
+  font-size: 16px;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+.btn-danger {
+  background: var(--color-error);
+  color: #fff;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #e06666;
+}
+
+.btn-outline {
+  background: transparent;
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+}
+
+.btn-outline:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+  border-color: var(--color-text-dim);
+}
+
+.btn-sm {
+  padding: 5px 14px;
+  font-size: 14px;
+}
+
+/* ── Checkbox toggle ── */
+.toggle-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toggle-wrapper input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+}
+
+.toggle-wrapper label {
+  margin-bottom: 0;
+  cursor: pointer;
+  color: var(--color-text);
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-dim);
+}

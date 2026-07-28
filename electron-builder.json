@@ -1,0 +1,46 @@
+{
+  "$schema": "./node_modules/app-builder-lib/scheme.json",
+  "appId": "com.osgb2tiles.converter",
+  "asar": true,
+  "productName": "OSGB 转 3D Tiles 桌面工作台",
+  "directories": {
+    "output": "release/${version}"
+  },
+  "files": ["dist", "dist-electron"],
+  "extraResources": [
+    {
+      "from": "public/3dtile",
+      "to": "3dtile"
+    },
+    {
+      "from": "public/cesium-preview.html",
+      "to": "cesium-preview.html"
+    }
+  ],
+  "electronDist": "node_modules/electron/dist",
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ],
+    "artifactName": "${productName}-Windows-${version}-Setup.${ext}",
+    "icon": "public/logo.svg",
+    "signingHashAlgorithms": ["sha256"],
+    "signDlls": true,
+    "rfc3161TimeStampServer": "http://timestamp.digicert.com",
+    "timeStampServer": "http://timestamp.digicert.com"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "deleteAppDataOnUninstall": false,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "OSGB 转 3D Tiles",
+    "uninstallDisplayName": "OSGB 转 3D Tiles 转换工具",
+    "warningsAsErrors": false
+  }
+}
