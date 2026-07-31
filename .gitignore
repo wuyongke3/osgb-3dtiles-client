@@ -34,3 +34,6 @@ yarn-error.log*
 
 # ── TypeScript cache ──
 *.tsbuildinfo
+
+# ── test data ──
+test-data/

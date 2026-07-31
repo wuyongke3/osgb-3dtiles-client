@@ -319,7 +319,7 @@ async function startConversion() {
         max_lvl: config.max_lvl,
         pbr: config.pbr,
       },
-      updateDirs: updateDirs.value,
+      updateDirs: [...updateDirs.value],
     });
 
     if (!result.success) {
@@ -1100,6 +1100,8 @@ onBeforeUnmount(() => {
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-all;
+  cursor: text;
+  user-select: text;
 }
 
 .log-placeholder {
@@ -1114,6 +1116,7 @@ onBeforeUnmount(() => {
 
 .log-line {
   color: var(--color-text);
+  user-select: text;
 }
 
 .log-line.is-err {
