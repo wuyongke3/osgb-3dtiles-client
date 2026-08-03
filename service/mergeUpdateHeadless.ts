@@ -635,6 +635,65 @@ function buildOsgbTileDescriptors(rootDir: string): { dataDir: string; tiles: Os
   return { dataDir, tiles }
 }
 
+function scanMaxOsgbLevel(rootDir: string): number | null {
+  const dataDir = getOsgbDataDir(rootDir)
+  if (!fs.existsSync(dataDir) || !fs.statSync(dataDir).isDirectory()) return null
+
+  let maxLevel: number | null = null
+  const scanDir = (dirPath: string): void => {
+    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+      const entryPath = path.join(dirPath, entry.name)
+      if (entry.isDirectory()) {
+        scanDir(entryPath)
+        continue
+      }
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.osgb')) continue
+
+      const matches = entry.name.matchAll(/_L(\d+)(?:_|\.|$)/gi)
+      for (const match of matches) {
+        const level = Number(match[1])
+        if (Number.isInteger(level)) {
+          maxLevel = maxLevel === null ? level : Math.max(maxLevel, level)
+        }
+      }
+    }
+  }
+
+  scanDir(dataDir)
+  return maxLevel
+}
+
+function resolveAutoMaxLevel(inputDir: string, updateDirs: string[], params: HeadlessMergeUpdateParams): number {
+  const dirs = [inputDir, ...updateDirs]
+  let maxLevel: number | null = null
+
+  for (const dir of dirs) {
+    const level = scanMaxOsgbLevel(dir)
+    if (level !== null) {
+      maxLevel = maxLevel === null ? level : Math.max(maxLevel, level)
+    }
+  }
+
+  const resolved = maxLevel ?? 20
+  emitStdout(params, maxLevel === null
+    ? `未扫描到 OSGB 层级，max_lvl 使用默认值: ${resolved}\n`
+    : `已扫描 OSGB 最大层级: ${resolved}\n`)
+  return resolved
+}
+
+function prepareConversionConfig(
+  config: HeadlessMergeUpdateConfig,
+  inputDir: string,
+  updateDirs: string[],
+  params: HeadlessMergeUpdateParams,
+): HeadlessMergeUpdateConfig {
+  if (config.max_lvl !== undefined && config.max_lvl !== null) return config
+  return {
+    ...config,
+    max_lvl: resolveAutoMaxLevel(inputDir, updateDirs, params),
+  }
+}
+
 function normalizeUpdateDirs(inputDir: string, updateDirs?: string[]): string[] {
   const normalizedInput = path.resolve(inputDir).toLowerCase()
   const seen = new Set<string>()
@@ -1618,7 +1677,7 @@ export async function runHeadlessMergeUpdate(
   try {
     preparedDirs = await prepareInputDirs(params)
     const inputDir = preparedDirs.inputDir
-    const config = params.config ?? {}
+    const inputConfig = params.config ?? {}
     const outputDir = params.outputDir && params.outputDir.trim()
       ? params.outputDir
       : getDefaultOutputDir(inputDir)
@@ -1632,6 +1691,7 @@ export async function runHeadlessMergeUpdate(
 
     isCancelled = false
     const updateDirs = normalizeUpdateDirs(inputDir, preparedDirs.updateDirs)
+    const config = prepareConversionConfig(inputConfig, inputDir, updateDirs, params)
 
     try {
       assertSafeOutputDirectory(inputDir, outputDir, updateDirs)

@@ -18,7 +18,7 @@ function printUsage(): void {
   process.stderr.write([
     'Usage:',
     '  merge-update-tool --original_scope <dir> --new_scope <dir> --new_scope <dir> --outputDir <dir>',
-    '  merge-update-tool --original-scope <dir> --new-scope <dir1,dir2> --level 100 --density 85',
+    '  merge-update-tool --original-scope <dir> --new-scope <dir1,dir2> --level 20 --density 85',
     '  merge-update-tool --config <config.json>',
     "  merge-update-tool --json '{\"inputDir\":\"...\"}'",
     '  type config.json | merge-update-tool --stdin',
@@ -26,7 +26,7 @@ function printUsage(): void {
     'Direct options:',
     '  --original_scope, --original-scope  大范围 OSGB 根目录',
     '  --new_scope, --new-scope          小范围更新目录，可重复、逗号分隔或 JSON 数组',
-    '  --level                          最大层级；直参模式下不传默认 100',
+    '  --level                          最大层级；不传时自动扫描 OSGB，扫描不到默认 20',
     '  --outputDir, --output-dir         输出目录',
     '  --density                        边缘清晰度/精细度，建议 50-98，默认 85',
     '  --x --y --offset                 手动中心坐标和高度偏移；通常 metadata 可自动推断',
@@ -225,7 +225,6 @@ function loadConfig(options: CliOptions): unknown {
   }
   if (options.hasDirectParams) {
     const source = { ...options.directParams }
-    if (source.max_lvl === undefined) source.max_lvl = 100
     if (source.edge_precision === undefined) source.edge_precision = 85
     return source
   }
