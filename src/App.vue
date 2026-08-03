@@ -3,11 +3,15 @@ import {
   computed,
   h,
   nextTick,
-  onBeforeUnmount,
   onMounted,
   reactive,
   ref,
 } from "vue";
+import {
+  cancelMergeUpdateConversion,
+  checkMergeUpdateTool,
+  runMergeUpdateConversion,
+} from "../service";
 
 type ConversionStatus = "idle" | "running" | "success" | "error" | "cancelled";
 type Theme = "dark" | "light";
@@ -34,6 +38,7 @@ interface Config {
   y: string;
   offset: number;
   max_lvl: number;
+  edge_precision: number;
   pbr: boolean;
 }
 
@@ -123,6 +128,7 @@ const config = reactive<Config>({
   y: "",
   offset: 0,
   max_lvl: 20,
+  edge_precision: 85,
   pbr: false,
 });
 
@@ -132,7 +138,6 @@ const validationMessage = ref("");
 const validationValid = ref<boolean | null>(null);
 const logLines = ref<string[]>([]);
 const logContainer = ref<HTMLElement | null>(null);
-let cleanupFns: (() => void)[] = [];
 
 const themeLabel = computed(() =>
   theme.value === "dark" ? "切换浅色" : "切换暗黑",
@@ -274,7 +279,7 @@ async function loadMetadata() {
 }
 
 async function startConversion() {
-  if (!inputDir.value || !outputDir.value) {
+  if (!inputDir.value) {
     appendLog("请先选择输入目录和输出目录", "err");
     return;
   }
@@ -283,24 +288,9 @@ async function startConversion() {
   statusMessage.value = "";
   logLines.value = [];
 
-  cleanupFns.push(
-    window.electronAPI.onConversionStdout((text) => appendLog(text, "out")),
-    window.electronAPI.onConversionStderr((text) => appendLog(text, "err")),
-    window.electronAPI.onConversionStatus((nextStatus) => {
-      status.value = nextStatus;
-      if (nextStatus === "success") {
-        appendLog("转换成功完成", "info");
-      } else if (nextStatus === "error") {
-        appendLog("转换失败", "err");
-      } else if (nextStatus === "cancelled") {
-        appendLog("转换已取消", "info");
-      }
-    }),
-  );
-
-  appendLog(`启动转换: ${inputDir.value} -> ${outputDir.value}`, "info");
+  appendLog(`启动转换: ${inputDir.value} -> ${outputDir.value || "auto"}`, "info");
   appendLog(
-    `配置: x=${config.x || "auto"}, y=${config.y || "auto"}, offset=${config.offset}, max_lvl=${config.max_lvl}, pbr=${config.pbr}`,
+    `配置: x=${config.x || "auto"}, y=${config.y || "auto"}, offset=${config.offset}, max_lvl=${config.max_lvl}, edge_precision=${config.edge_precision}, pbr=${config.pbr}`,
     "info",
   );
   if (updateDirs.value.length > 0) {
@@ -309,18 +299,33 @@ async function startConversion() {
   appendLog("-".repeat(60), "info");
 
   try {
-    const result = await window.electronAPI.startConversion({
+    const result = await runMergeUpdateConversion({
       inputDir: inputDir.value,
       outputDir: outputDir.value,
-      config: {
-        x: config.x,
-        y: config.y,
-        offset: config.offset,
-        max_lvl: config.max_lvl,
-        pbr: config.pbr,
-      },
       updateDirs: [...updateDirs.value],
+      x: config.x,
+      y: config.y,
+      offset: config.offset,
+      max_lvl: config.max_lvl,
+      edge_precision: config.edge_precision,
+      pbr: config.pbr,
+      onStdout: (text) => appendLog(text, "out"),
+      onStderr: (text) => appendLog(text, "err"),
+      onStatus: (nextStatus) => {
+        status.value = nextStatus;
+        if (nextStatus === "success") {
+          appendLog("转换成功完成", "info");
+        } else if (nextStatus === "error") {
+          appendLog("转换失败", "err");
+        } else if (nextStatus === "cancelled") {
+          appendLog("转换已取消", "info");
+        }
+      },
     });
+
+    if (result.outputDir) {
+      outputDir.value = result.outputDir;
+    }
 
     if (!result.success) {
       statusMessage.value = result.error || "转换失败";
@@ -331,12 +336,10 @@ async function startConversion() {
     appendLog(`错误: ${statusMessage.value}`, "err");
   }
 
-  cleanupFns.forEach((fn) => fn());
-  cleanupFns = [];
 }
 
 async function cancelConversion() {
-  await window.electronAPI.cancelConversion();
+  await cancelMergeUpdateConversion();
 }
 
 function clearLog() {
@@ -384,7 +387,7 @@ onMounted(async () => {
         : "light",
   );
 
-  const result = await window.electronAPI.checkTool();
+  const result = await checkMergeUpdateTool();
   toolExists.value = result.exists;
   toolPath.value = result.path;
   if (!result.exists) {
@@ -394,9 +397,6 @@ onMounted(async () => {
   }
 });
 
-onBeforeUnmount(() => {
-  cleanupFns.forEach((fn) => fn());
-});
 </script>
 
 <template>
@@ -587,6 +587,17 @@ onBeforeUnmount(() => {
                 max="100"
               />
             </div>
+            <div class="param-item">
+              <label for="cfg-edge">边缘精细度 %</label>
+              <input
+                id="cfg-edge"
+                v-model.number="config.edge_precision"
+                type="number"
+                min="50"
+                max="98"
+                step="1"
+              />
+            </div>
           </div>
 
           <div class="toggle-wrapper pbr-toggle">
@@ -599,7 +610,7 @@ onBeforeUnmount(() => {
           <button
             class="btn-primary btn-start button-with-icon"
             type="button"
-            :disabled="status === 'running' || !inputDir || !outputDir"
+            :disabled="status === 'running' || !inputDir"
             @click="startConversion"
           >
             <Icon name="play" :size="18" />

@@ -1,47 +1,7 @@
-import { app, BrowserWindow, shell, ipcMain, dialog } from 'electron'
-import { createRequire } from 'node:module'
-import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs'
-import http from 'node:http'
-import net from 'node:net'
 import { spawn, type ChildProcess } from 'node:child_process'
-
-const require = createRequire(import.meta.url)
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-
-// ─── Environment paths ────────────────────────────────────────────────
-process.env.APP_ROOT = path.join(__dirname, '../..')
-
-export const MAIN_DIST = path.join(process.env.APP_ROOT, 'dist-electron')
-export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
-export const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
-
-process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
-  ? path.join(process.env.APP_ROOT, 'public')
-  : RENDERER_DIST
-
-// ─── Platform checks ──────────────────────────────────────────────────
-if (process.platform === 'win32' && os.release().startsWith('6.1')) app.disableHardwareAcceleration()
-if (process.platform === 'win32') app.setAppUserModelId(app.getName())
-
-if (!app.requestSingleInstanceLock()) {
-  app.quit()
-  process.exit(0)
-}
-
-// ─── Get 3dtile.exe path ──────────────────────────────────────────────
-function get3dtilePath(): string {
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, '3dtile', '3dtile.exe')
-  }
-  return path.join(process.env.APP_ROOT!, 'public', '3dtile', '3dtile.exe')
-}
-
-function get3dtileDir(): string {
-  return path.dirname(get3dtilePath())
-}
 
 function getDefaultOutputDir(inputDir: string): string {
   const resolvedInputDir = path.resolve(inputDir)
@@ -1191,7 +1151,7 @@ function tilesetWorldSphere(tilesetPath: string): number[] {
   const bounds = root ? getTileBounds(root) : null
   if (!root || !bounds) return [0, 0, 0, 1]
 
-  const corners: Array<[number, number, number]> = [
+  const sourceCorners: Array<[number, number, number]> = [
     [bounds.minX, bounds.minY, bounds.minZ],
     [bounds.minX, bounds.minY, bounds.maxZ],
     [bounds.minX, bounds.maxY, bounds.minZ],
@@ -1200,7 +1160,8 @@ function tilesetWorldSphere(tilesetPath: string): number[] {
     [bounds.maxX, bounds.minY, bounds.maxZ],
     [bounds.maxX, bounds.maxY, bounds.minZ],
     [bounds.maxX, bounds.maxY, bounds.maxZ],
-  ].map((corner) => transformPoint(root.transform, corner))
+  ]
+  const corners = sourceCorners.map((corner) => transformPoint(root.transform, corner))
 
   const min = [Infinity, Infinity, Infinity]
   const max = [-Infinity, -Infinity, -Infinity]
@@ -1320,17 +1281,7 @@ function mergeConvertedTilesets(
   }
 }
 
-let conversionProcess: ChildProcess | null = null
-let isCancelled = false
-let isConversionRunning = false
-
-type ConversionStatus = 'idle' | 'running' | 'success' | 'error' | 'cancelled'
-
-interface ConversionEventSender {
-  send(channel: string, ...args: unknown[]): void
-}
-
-interface ConversionConfigParams {
+export interface HeadlessMergeUpdateConfig {
   x?: number | string
   y?: number | string
   offset?: number
@@ -1339,503 +1290,265 @@ interface ConversionConfigParams {
   pbr?: boolean
 }
 
-interface ConversionParams {
+export interface HeadlessMergeUpdateParams {
   inputDir: string
   outputDir?: string
-  config: ConversionConfigParams
   updateDirs?: string[]
+  config?: HeadlessMergeUpdateConfig
+  toolDir?: string
+  exePath?: string
+  onStdout?: (text: string) => void
+  onStderr?: (text: string) => void
+  onStatus?: (status: 'running' | 'success' | 'error' | 'cancelled') => void
 }
 
-interface ConversionResult {
+interface PreparedInputDirs {
+  inputDir: string
+  updateDirs?: string[]
+  cleanupDir: string | null
+}
+
+export interface HeadlessMergeUpdateResult {
   success: boolean
   error?: string
   outputDir?: string
 }
 
-interface ConversionLogEntry {
-  channel: string
-  args: unknown[]
+let conversionProcess: ChildProcess | null = null
+let isCancelled = false
+
+function getDefaultToolDir(): string {
+  return path.resolve(process.cwd(), 'public', '3dtile')
 }
 
-// ─── HTTP server for 3D Tiles preview ───────────────────────────────
-let previewServer: http.Server | null = null
-let previewPort = 0
-let lastOutputDir = ''
-let lastConfigX = 0
-let lastConfigY = 0
-let lastConfigOffset = 0
-
-// MIME types for static file serving
-const MIME_TYPES: Record<string, string> = {
-  '.json': 'application/json',
-  '.b3dm': 'application/octet-stream',
-  '.i3dm': 'application/octet-stream',
-  '.pnts': 'application/octet-stream',
-  '.cmpt': 'application/octet-stream',
-  '.glb': 'model/gltf-binary',
-  '.gltf': 'model/gltf+json',
-  '.bin': 'application/octet-stream',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.svg': 'image/svg+xml',
-  '.css': 'text/css',
-  '.js': 'application/javascript',
-  '.html': 'text/html',
-  '.xml': 'application/xml',
-  '.wasm': 'application/wasm',
-  '.ktx2': 'image/ktx2',
-  '.basis': 'application/octet-stream',
+function getHeadlessExePath(params: HeadlessMergeUpdateParams): string {
+  if (params.exePath) return path.resolve(params.exePath)
+  const toolDir = params.toolDir ? path.resolve(params.toolDir) : getDefaultToolDir()
+  return path.join(toolDir, process.platform === 'win32' ? '3dtile.exe' : '3dtile')
 }
 
-function findFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer()
-    server.unref()
-    server.on('error', reject)
-    server.listen(0, () => {
-      const address = server.address()
-      if (address && typeof address === 'object') {
-        const port = address.port
-        server.close(() => resolve(port))
-      } else {
-        reject(new Error('Failed to find free port'))
-      }
+function emitStdout(params: HeadlessMergeUpdateParams, text: string): void {
+  params.onStdout?.(text)
+}
+
+function emitStderr(params: HeadlessMergeUpdateParams, text: string): void {
+  params.onStderr?.(text)
+}
+
+function emitStatus(params: HeadlessMergeUpdateParams, status: 'running' | 'success' | 'error' | 'cancelled'): void {
+  params.onStatus?.(status)
+}
+
+function isHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value)
+}
+
+function safePathPart(value: string): string {
+  const cleaned = value.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/\.+$/g, '')
+  return cleaned || 'download'
+}
+
+function fileNameFromUrl(url: string): string {
+  const parsed = new URL(url)
+  const name = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() ?? '')
+  return safePathPart(name || 'download')
+}
+
+function looksLikeArchiveUrl(url: string): boolean {
+  return /\.(zip|tar\.gz|tgz)$/i.test(new URL(url).pathname)
+}
+
+async function fetchOk(url: string): Promise<Response> {
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`下载失败 ${response.status} ${response.statusText}: ${url}`)
+  }
+  return response
+}
+
+async function downloadFile(url: string, outputPath: string): Promise<void> {
+  const response = await fetchOk(url)
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true })
+  const bytes = Buffer.from(await response.arrayBuffer())
+  fs.writeFileSync(outputPath, bytes)
+}
+
+function stripHtmlTags(text: string): string {
+  return text.replace(/<[^>]*>/g, '')
+}
+
+function decodeHtmlEntity(text: string): string {
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+}
+
+function parseDirectoryLinks(html: string, baseUrl: string): string[] {
+  const links: string[] = []
+  const pattern = /<a\b[^>]*\bhref\s*=\s*(["'])(.*?)\1/gi
+  let match: RegExpExecArray | null
+
+  while ((match = pattern.exec(html))) {
+    const rawHref = decodeHtmlEntity(stripHtmlTags(match[2] ?? '').trim())
+    if (!rawHref || rawHref === '../' || rawHref === './' || rawHref.startsWith('#')) continue
+    if (/^(mailto|javascript):/i.test(rawHref)) continue
+
+    const nextUrl = new URL(rawHref, baseUrl).toString()
+    const base = new URL(baseUrl)
+    const next = new URL(nextUrl)
+    if (next.origin !== base.origin) continue
+    if (!next.pathname.startsWith(base.pathname.endsWith('/') ? base.pathname : `${base.pathname}/`)) continue
+    links.push(nextUrl)
+  }
+
+  return Array.from(new Set(links))
+}
+
+async function extractZip(zipPath: string, outputDir: string): Promise<void> {
+  fs.mkdirSync(outputDir, { recursive: true })
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      'Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force',
+      zipPath,
+      outputDir,
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
     })
+
+    let stderr = ''
+    child.stderr?.on('data', (data: Buffer) => {
+      stderr += data.toString('utf-8')
+    })
+    child.on('close', (code) => {
+      code === 0 ? resolve() : reject(new Error(`解压 zip 失败: ${stderr || code}`))
+    })
+    child.on('error', reject)
   })
 }
 
-function getCesiumPath(): string {
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'cesium')
-  }
-  return path.join(process.env.APP_ROOT!, 'public', 'cesium')
-}
-
-function resolveServedFile(rootDir: string, urlPath: string): string | null {
-  const filePath = path.normalize(path.join(rootDir, urlPath))
-  const relative = path.relative(rootDir, filePath)
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
-    return null
-  }
-  return filePath
-}
-
-function startStaticServer(serveDir: string, port: number): Promise<http.Server> {
-  return new Promise((resolve, reject) => {
-    const server = http.createServer((req, res) => {
-      // Handle CORS preflight
-      if (req.method === 'OPTIONS') {
-        res.writeHead(204, {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, Range',
-        })
-        res.end()
-        return
-      }
-
-      // Parse URL to separate pathname from query string
-      const parsedUrl = new URL(req.url || '/', 'http://localhost')
-      let urlPath = decodeURIComponent(parsedUrl.pathname)
-      if (urlPath.includes('..')) {
-        res.writeHead(403)
-        res.end('Forbidden')
-        return
-      }
-
-      // Default: serve tileset.json at root
-      if (urlPath === '/' || urlPath === '') {
-        urlPath = '/tileset.json'
-      }
-
-      const cesiumPrefix = '/cesium/'
-      const serveRoot = urlPath.startsWith(cesiumPrefix) ? getCesiumPath() : serveDir
-      const relativePath = urlPath.startsWith(cesiumPrefix)
-        ? urlPath.slice(cesiumPrefix.length)
-        : urlPath.slice(1)
-      const filePath = resolveServedFile(serveRoot, relativePath)
-
-      // Check file exists
-      if (!filePath || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-        res.writeHead(404)
-        res.end('Not Found')
-        return
-      }
-
-      const ext = path.extname(filePath).toLowerCase()
-      const contentType = MIME_TYPES[ext] || 'application/octet-stream'
-
-      // CORS headers for Cesium worker/asset loading
-      res.writeHead(200, {
-        'Content-Type': contentType,
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Range',
-        'Cross-Origin-Resource-Policy': 'cross-origin',
-      })
-
-      // Stream the file
-      const stream = fs.createReadStream(filePath)
-      stream.on('error', () => {
-        res.writeHead(500)
-        res.end('Internal Error')
-      })
-      stream.pipe(res)
+async function extractTarGz(archivePath: string, outputDir: string): Promise<void> {
+  fs.mkdirSync(outputDir, { recursive: true })
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('tar.exe', ['-xzf', archivePath, '-C', outputDir], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
     })
 
-    server.on('error', reject)
-    server.listen(port, () => resolve(server))
+    let stderr = ''
+    child.stderr?.on('data', (data: Buffer) => {
+      stderr += data.toString('utf-8')
+    })
+    child.on('close', (code) => {
+      code === 0 ? resolve() : reject(new Error(`解压 tar.gz 失败: ${stderr || code}`))
+    })
+    child.on('error', reject)
   })
 }
 
-function stopStaticServer(): void {
-  if (previewServer) {
-    previewServer.close()
-    previewServer = null
-    previewPort = 0
+function findOsgbRoot(dirPath: string): string {
+  if (fs.existsSync(path.join(dirPath, 'Data'))) return dirPath
+  const entries = fs.existsSync(dirPath) ? fs.readdirSync(dirPath, { withFileTypes: true }) : []
+  const dirs = entries.filter((entry) => entry.isDirectory())
+  if (dirs.length === 1) {
+    const nested = path.join(dirPath, dirs[0]!.name)
+    if (fs.existsSync(path.join(nested, 'Data'))) return nested
   }
+  return dirPath
 }
 
-function getPreviewHtmlPath(): string {
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'cesium-preview.html')
-  }
-  return path.join(process.env.APP_ROOT!, 'public', 'cesium-preview.html')
-}
+async function downloadHttpDirectory(url: string, outputDir: string): Promise<void> {
+  const baseUrl = url.endsWith('/') ? url : `${url}/`
+  const visited = new Set<string>()
 
-let mergeUpdateApiServer: http.Server | null = null
-let mergeUpdateApiPort = 0
+  const visit = async (currentUrl: string): Promise<void> => {
+    if (visited.has(currentUrl)) return
+    visited.add(currentUrl)
 
-function getMergeUpdateApiPort(): number {
-  const port = Number(process.env.MERGE_UPDATE_API_PORT)
-  return Number.isInteger(port) && port > 0 && port < 65536 ? port : 18080
-}
-
-function sendJsonResponse(res: http.ServerResponse, statusCode: number, payload: unknown): void {
-  const body = JSON.stringify(payload)
-  res.writeHead(statusCode, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(body),
-  })
-  res.end(body)
-}
-
-function isMergeUpdateApiAuthorized(req: http.IncomingMessage): boolean {
-  const token = process.env.MERGE_UPDATE_API_TOKEN
-  if (!token) return true
-
-  const headerToken = req.headers['x-merge-update-token']
-  const authorization = req.headers.authorization
-  return headerToken === token || authorization === `Bearer ${token}`
-}
-
-function readJsonRequestBody(req: http.IncomingMessage): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = []
-    let size = 0
-    const maxSize = 1024 * 1024
-
-    req.on('data', (chunk: Buffer) => {
-      size += chunk.length
-      if (size > maxSize) {
-        reject(new Error('请求体超过 1MB'))
-        req.destroy()
-        return
-      }
-      chunks.push(chunk)
-    })
-
-    req.on('end', () => {
-      const text = Buffer.concat(chunks).toString('utf-8').trim()
-      if (!text) {
-        resolve({})
-        return
-      }
-
-      try {
-        resolve(JSON.parse(text))
-      } catch {
-        reject(new Error('请求体不是有效 JSON'))
-      }
-    })
-
-    req.on('error', reject)
-  })
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
-}
-
-function toOptionalString(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined
-}
-
-function toUpdateDirs(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined
-  return value.filter((item): item is string => typeof item === 'string')
-}
-
-function buildHttpConversionParams(body: unknown): ConversionParams {
-  const source = asRecord(body)
-  const config = asRecord(source.config)
-  const inputDir = toOptionalString(source.inputDir) ?? ''
-
-  return {
-    inputDir,
-    outputDir: toOptionalString(source.outputDir),
-    updateDirs: toUpdateDirs(source.updateDirs),
-    config: {
-      x: config.x ?? source.x,
-      y: config.y ?? source.y,
-      offset: (config.offset ?? source.offset) as number | undefined,
-      max_lvl: (config.max_lvl ?? source.max_lvl ?? source.maxLvl) as number | undefined,
-      edge_precision: (config.edge_precision ?? source.edge_precision ?? source.edgePrecision) as number | undefined,
-      pbr: (config.pbr ?? source.pbr) as boolean | undefined,
-    },
-  }
-}
-
-async function startConversionTask(
-  sender: ConversionEventSender,
-  params: ConversionParams,
-): Promise<ConversionResult> {
-  if (isConversionRunning) {
-    return { success: false, error: '已有转换任务正在运行' }
-  }
-
-  isConversionRunning = true
-  try {
-    return await startConversionFromParams(sender, params)
-  } finally {
-    isConversionRunning = false
-  }
-}
-
-async function handleMergeUpdateApiRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  if (!isMergeUpdateApiAuthorized(req)) {
-    sendJsonResponse(res, 401, { success: false, error: '未授权' })
-    return
-  }
-
-  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`)
-
-  if (req.method === 'GET' && url.pathname === '/api/merge-update/health') {
-    sendJsonResponse(res, 200, {
-      success: true,
-      status: isConversionRunning ? 'running' : 'idle',
-      port: mergeUpdateApiPort,
-      tool: {
-        exists: fs.existsSync(get3dtilePath()),
-        path: get3dtilePath(),
-      },
-    })
-    return
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/merge-update/cancel') {
-    if (conversionProcess) {
-      isCancelled = true
-      conversionProcess.kill('SIGTERM')
-      sendJsonResponse(res, 200, { success: true })
-    } else {
-      sendJsonResponse(res, 200, { success: false, error: '当前没有可取消的转换进程' })
-    }
-    return
-  }
-
-  if (req.method !== 'POST' || url.pathname !== '/api/merge-update') {
-    sendJsonResponse(res, 404, { success: false, error: '接口不存在' })
-    return
-  }
-
-  try {
-    const body = await readJsonRequestBody(req)
-    const source = asRecord(body)
-    const params = buildHttpConversionParams(body)
-    if (!params.inputDir.trim()) {
-      sendJsonResponse(res, 400, { success: false, error: 'inputDir 不能为空' })
+    const response = await fetchOk(currentUrl)
+    const contentType = response.headers.get('content-type') ?? ''
+    if (!contentType.includes('text/html')) {
+      const relative = decodeURIComponent(new URL(currentUrl).pathname.slice(new URL(baseUrl).pathname.length))
+      const targetPath = path.join(outputDir, ...relative.split('/').filter(Boolean).map(safePathPart))
+      await downloadFile(currentUrl, targetPath || path.join(outputDir, fileNameFromUrl(currentUrl)))
       return
     }
 
-    const logs: ConversionLogEntry[] = []
-    const includeLogs = source.includeLogs === true
-    const sender: ConversionEventSender = {
-      send(channel, ...args) {
-        if (!includeLogs) return
-        logs.push({ channel, args })
-        if (logs.length > 2000) logs.shift()
-      },
+    const html = await response.text()
+    const links = parseDirectoryLinks(html, currentUrl)
+    for (const link of links) {
+      const parsed = new URL(link)
+      if (parsed.pathname.endsWith('/')) {
+        await visit(link)
+      } else {
+        const relative = decodeURIComponent(parsed.pathname.slice(new URL(baseUrl).pathname.length))
+        const targetPath = path.join(outputDir, ...relative.split('/').filter(Boolean).map(safePathPart))
+        await downloadFile(link, targetPath)
+      }
     }
-
-    const result = await startConversionTask(sender, params)
-    sendJsonResponse(res, result.success ? 200 : 500, includeLogs ? { ...result, logs } : result)
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
-    sendJsonResponse(res, 400, { success: false, error: message })
   }
+
+  await visit(baseUrl)
 }
 
-function startMergeUpdateApiServer(): Promise<void> {
-  if (mergeUpdateApiServer) return Promise.resolve()
+async function prepareHttpInput(url: string, rootDir: string, name: string, params: HeadlessMergeUpdateParams): Promise<string> {
+  const targetDir = path.join(rootDir, safePathPart(name))
+  fs.mkdirSync(targetDir, { recursive: true })
+  emitStdout(params, `下载远程 OSGB: ${url}\n`)
 
-  const port = getMergeUpdateApiPort()
-  mergeUpdateApiPort = port
+  if (looksLikeArchiveUrl(url)) {
+    const archivePath = path.join(rootDir, `${safePathPart(name)}_${fileNameFromUrl(url)}`)
+    await downloadFile(url, archivePath)
+    if (/\.zip$/i.test(new URL(url).pathname)) {
+      await extractZip(archivePath, targetDir)
+    } else if (/\.(tar\.gz|tgz)$/i.test(new URL(url).pathname)) {
+      await extractTarGz(archivePath, targetDir)
+    }
+    return findOsgbRoot(targetDir)
+  }
 
-  return new Promise((resolve, reject) => {
-    const server = http.createServer((req, res) => {
-      handleMergeUpdateApiRequest(req, res).catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err)
-        sendJsonResponse(res, 500, { success: false, error: message })
-      })
-    })
-
-    server.on('error', reject)
-    server.listen(port, '127.0.0.1', () => {
-      mergeUpdateApiServer = server
-      console.log(`Merge update API listening on http://127.0.0.1:${port}`)
-      resolve()
-    })
-  })
+  await downloadHttpDirectory(url, targetDir)
+  return findOsgbRoot(targetDir)
 }
 
-function stopMergeUpdateApiServer(): void {
-  if (!mergeUpdateApiServer) return
-  mergeUpdateApiServer.close()
-  mergeUpdateApiServer = null
-  mergeUpdateApiPort = 0
-}
+async function prepareInputDirs(params: HeadlessMergeUpdateParams): Promise<PreparedInputDirs> {
+  const inputDir = params.inputDir.trim()
+  const updateDirs = params.updateDirs ?? []
+  const hasRemoteInput = isHttpUrl(inputDir) || updateDirs.some(isHttpUrl)
 
-// ─── Window management ────────────────────────────────────────────────
-let win: BrowserWindow | null = null
-const preload = path.join(__dirname, '../preload/index.mjs')
-const indexHtml = path.join(RENDERER_DIST, 'index.html')
-
-async function createWindow() {
-  win = new BrowserWindow({
-    title: '3DMine(osgb转3dtile工具)',
-    icon: path.join(process.env.VITE_PUBLIC!, 'logo.png'),
-    width: 1200,
-    height: 800,
-    minWidth: 900,
-    minHeight: 600,
-    webPreferences: {
-      preload,
-    },
-  })
-
-  if (VITE_DEV_SERVER_URL) {
-    win.loadURL(VITE_DEV_SERVER_URL)
-    win.webContents.openDevTools()
-  } else {
-    win.loadFile(indexHtml)
+  if (!hasRemoteInput) {
+    return { inputDir, updateDirs, cleanupDir: null }
   }
 
-  win.webContents.on('did-finish-load', () => {
-    win?.webContents.send('main-process-message', new Date().toLocaleString())
-  })
+  const cleanupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'merge-update-http-'))
+  const preparedInputDir = isHttpUrl(inputDir)
+    ? await prepareHttpInput(inputDir, cleanupDir, 'original_scope', params)
+    : inputDir
 
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('https:')) shell.openExternal(url)
-    return { action: 'deny' }
-  })
-}
-
-app.whenReady().then(async () => {
-  try {
-    await startMergeUpdateApiServer()
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
-    console.error(`Merge update API 启动失败: ${message}`)
+  const preparedUpdateDirs: string[] = []
+  for (let index = 0; index < updateDirs.length; index++) {
+    const updateDir = updateDirs[index]!
+    preparedUpdateDirs.push(isHttpUrl(updateDir)
+      ? await prepareHttpInput(updateDir, cleanupDir, `new_scope_${index}`, params)
+      : updateDir)
   }
 
-  await createWindow()
-})
-
-app.on('window-all-closed', () => {
-  win = null
-  stopMergeUpdateApiServer()
-  if (process.platform !== 'darwin') app.quit()
-})
-
-app.on('before-quit', () => {
-  stopMergeUpdateApiServer()
-})
-
-app.on('second-instance', () => {
-  if (win) {
-    if (win.isMinimized()) win.restore()
-    win.focus()
-  }
-})
-
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length) {
-    BrowserWindow.getAllWindows()[0]?.focus()
-  } else {
-    createWindow()
-  }
-})
-
-// ─── IPC Handlers ─────────────────────────────────────────────────────
-
-// Select OSGB input directory
-ipcMain.handle('select-osgb-dir', async () => {
-  if (!win) return null
-  const result = await dialog.showOpenDialog(win, {
-    title: '选择 OSGB 数据目录',
-    properties: ['openDirectory'],
-    message: '请选择包含 Data/ 子目录和 metadata.xml 的 OSGB 数据根目录',
-  })
-  if (result.canceled || result.filePaths.length === 0) return null
-  return result.filePaths[0]!
-})
-
-// Select output directory
-ipcMain.handle('select-output-dir', async () => {
-  if (!win) return null
-  const result = await dialog.showOpenDialog(win, {
-    title: '选择 3D Tiles 输出目录',
-    properties: ['openDirectory', 'createDirectory'],
-    message: '选择 3D Tiles 文件的输出目标目录',
-  })
-  if (result.canceled || result.filePaths.length === 0) return null
-  return result.filePaths[0]!
-})
-
-// Read and parse metadata.xml
-ipcMain.handle('read-metadata', async (_event, dirPath: string) => {
-  const metadataPath = path.join(dirPath, 'metadata.xml')
-  const exists = fs.existsSync(metadataPath)
-  if (!exists) {
-    return { found: false, data: null }
-  }
-  const data = parseMetadataXml(metadataPath)
-  return { found: true, path: metadataPath, data }
-})
-
-// Validate OSGB directory structure
-ipcMain.handle('validate-osgb-structure', async (_event, dirPath: string) => {
-  return validateOsgbStructure(dirPath)
-})
-
-// Get default conversion config
-ipcMain.handle('get-default-config', async () => {
   return {
-    x: '',
-    y: '',
-    offset: 0,
-    max_lvl: 20,
-    edge_precision: 85,
-    pbr: false,
+    inputDir: preparedInputDir,
+    updateDirs: preparedUpdateDirs,
+    cleanupDir,
   }
-})
+}
 
-function run3dTileConversion(
-  sender: ConversionEventSender,
+function runHeadless3dTileConversion(
+  params: HeadlessMergeUpdateParams,
   exePath: string,
   exeDir: string,
   gdalDataPath: string,
@@ -1864,374 +1577,162 @@ function run3dTileConversion(
       })
 
       conversionProcess.stdout?.on('data', (data: Buffer) => {
-        sender.send('conversion-stdout', data.toString('utf-8'))
+        emitStdout(params, data.toString('utf-8'))
       })
 
       conversionProcess.stderr?.on('data', (data: Buffer) => {
-        sender.send('conversion-stderr', data.toString('utf-8'))
+        emitStderr(params, data.toString('utf-8'))
       })
 
       conversionProcess.on('close', (code) => {
         conversionProcess = null
         if (isCancelled) {
-          reject(new Error('转换已取消'))
+          reject(new Error('?????'))
         } else if (code === 0) {
           resolve()
         } else {
-          reject(new Error(`转换进程异常退出，退出码: ${code}`))
+          reject(new Error(`????????????: ${code}`))
         }
       })
 
       conversionProcess.on('error', (err) => {
         conversionProcess = null
         const message = err.message.includes('ENOENT')
-          ? `无法启动转换工具: ${exePath}，请确认文件存在`
-          : `启动转换进程失败: ${err.message}`
+          ? `????????: ${exePath}????????`
+          : `????????: ${err.message}`
         reject(new Error(message))
       })
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
-      reject(new Error(`启动转换失败: ${message}`))
+      reject(new Error(`??????: ${message}`))
     }
   })
 }
 
-async function startConversionFromParams(
-  sender: ConversionEventSender,
-  params: ConversionParams,
-): Promise<ConversionResult> {
-  const { inputDir, config } = params
-  const outputDir = params.outputDir && params.outputDir.trim()
-    ? params.outputDir
-    : getDefaultOutputDir(inputDir)
+export async function runHeadlessMergeUpdate(
+  params: HeadlessMergeUpdateParams,
+): Promise<HeadlessMergeUpdateResult> {
+  if (!params.inputDir?.trim()) return { success: false, error: 'inputDir 不能为空' }
 
-  // Build config JSON
-  const configObj: Record<string, unknown> = {}
-  if (config.x !== '' && config.x !== undefined) configObj.x = Number(config.x)
-  if (config.y !== '' && config.y !== undefined) configObj.y = Number(config.y)
-  if (config.offset !== undefined) configObj.offset = Number(config.offset)
-  configObj.max_lvl = config.max_lvl ?? 20
-  configObj.pbr = config.pbr ?? false
-
-  const configJson = JSON.stringify(configObj)
-  const exePath = get3dtilePath()
-  const exeDir = get3dtileDir()
-
-  // Store for preview
-  lastOutputDir = outputDir
-  lastConfigX = configObj.x !== undefined ? Number(configObj.x) : 0
-  lastConfigY = configObj.y !== undefined ? Number(configObj.y) : 0
-  lastConfigOffset = Number(configObj.offset ?? 0)
-
-  // Ensure the tool exists
-  if (!fs.existsSync(exePath)) {
-    return { success: false, error: `转换工具未找到: ${exePath}` }
-  }
-
-  // Set GDAL_DATA environment variable so GDAL can find its data files
-  const gdalDataPath = path.join(exeDir, 'gdal_data')
-
-  isCancelled = false
-
-  let conversionInputDir = inputDir
-  let tempMergeDir: string | null = null
-  const updateDirs = normalizeUpdateDirs(inputDir, params.updateDirs)
-
+  let preparedDirs: PreparedInputDirs | null = null
   try {
-    assertSafeOutputDirectory(inputDir, outputDir, updateDirs)
-    clearOutputDirectory(outputDir)
-    sender.send('conversion-stdout', `已清空输出目录: ${outputDir}\n`)
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
-    sender.send('conversion-status', 'error')
-    return { success: false, error: `清空输出目录失败: ${message}`, outputDir }
-  }
+    preparedDirs = await prepareInputDirs(params)
+    const inputDir = preparedDirs.inputDir
+    const config = params.config ?? {}
+    const outputDir = params.outputDir && params.outputDir.trim()
+      ? params.outputDir
+      : getDefaultOutputDir(inputDir)
+    const exePath = getHeadlessExePath(params)
+    const exeDir = path.dirname(exePath)
+    const gdalDataPath = path.join(exeDir, 'gdal_data')
 
-  if (updateDirs.length > 0) {
-    const tempConversionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tiles-merge-'))
-    const baseConfigObj = buildConversionConfig(config, inputDir)
+    if (!fs.existsSync(exePath)) {
+      return { success: false, error: `转换工具未找到: ${exePath}` }
+    }
 
-    lastOutputDir = outputDir
-    lastConfigX = baseConfigObj.x !== undefined ? Number(baseConfigObj.x) : 0
-    lastConfigY = baseConfigObj.y !== undefined ? Number(baseConfigObj.y) : 0
-    lastConfigOffset = Number(baseConfigObj.offset ?? 0)
+    isCancelled = false
+    const updateDirs = normalizeUpdateDirs(inputDir, preparedDirs.updateDirs)
 
-    sender.send('conversion-status', 'running')
     try {
-      sender.send('conversion-stdout', `开始 3D Tiles 分阶段合并，共 ${updateDirs.length} 个小范围更新目录\n`)
+      assertSafeOutputDirectory(inputDir, outputDir, updateDirs)
+      clearOutputDirectory(outputDir)
+      emitStdout(params, `已清空输出目录: ${outputDir}\n`)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      emitStatus(params, 'error')
+      return { success: false, error: `清空输出目录失败: ${message}`, outputDir }
+    }
 
-      const baseOutputDir = path.join(tempConversionDir, 'base')
-      sender.send('conversion-stdout', `大范围转换参数: ${JSON.stringify(baseConfigObj)}\n`)
-      sender.send('conversion-stdout', `转换大范围: ${inputDir}\n`)
-      await run3dTileConversion(sender, exePath, exeDir, gdalDataPath, inputDir, baseOutputDir, baseConfigObj)
+    if (updateDirs.length > 0) {
+      const tempConversionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tiles-merge-'))
+      const baseConfigObj = buildConversionConfig(config, inputDir)
 
-      const baseOrigin = getCoverageOrigin(inputDir, baseConfigObj)
-      if (!baseOrigin) {
-        throw new Error('无法确定大范围转换原点，不能进行 3D Tiles 合并')
-      }
+      emitStatus(params, 'running')
+      try {
+        emitStdout(params, `开始 3D Tiles 分阶段合并，共 ${updateDirs.length} 个小范围更新目录\n`)
 
-      const convertedUpdates: Array<{ outputDir: string; deltaToBase: CoordinateDelta }> = []
-      for (let index = 0; index < updateDirs.length; index++) {
-        const updateDir = updateDirs[index]!
-        assertCompatibleMetadata(inputDir, updateDir)
+        const baseOutputDir = path.join(tempConversionDir, 'base')
+        emitStdout(params, `大范围转换参数: ${JSON.stringify(baseConfigObj)}\n`)
+        emitStdout(params, `转换大范围: ${inputDir}\n`)
+        await runHeadless3dTileConversion(params, exePath, exeDir, gdalDataPath, inputDir, baseOutputDir, baseConfigObj)
 
-        const updateConfigObj = buildConversionConfig(config, updateDir)
-        const updateOrigin = getCoverageOrigin(updateDir, updateConfigObj)
-        if (!updateOrigin) {
-          throw new Error(`无法确定小范围转换原点: ${updateDir}`)
+        const baseOrigin = getCoverageOrigin(inputDir, baseConfigObj)
+        if (!baseOrigin) {
+          throw new Error('无法确定大范围转换原点，不能进行 3D Tiles 合并')
         }
 
-        const updateOutputDir = path.join(tempConversionDir, `update_${index}`)
-        sender.send('conversion-stdout', `小范围转换参数 ${index + 1}/${updateDirs.length}: ${JSON.stringify(updateConfigObj)}\n`)
-        sender.send('conversion-stdout', `转换小范围 ${index + 1}/${updateDirs.length}: ${updateDir}\n`)
-        await run3dTileConversion(sender, exePath, exeDir, gdalDataPath, updateDir, updateOutputDir, updateConfigObj)
+        const convertedUpdates: Array<{ outputDir: string; deltaToBase: CoordinateDelta }> = []
+        for (let index = 0; index < updateDirs.length; index++) {
+          const updateDir = updateDirs[index]!
+          assertCompatibleMetadata(inputDir, updateDir)
 
-        convertedUpdates.push({
-          outputDir: updateOutputDir,
-          deltaToBase: {
-            x: updateOrigin.x - baseOrigin.x,
-            y: updateOrigin.y - baseOrigin.y,
-            z: updateOrigin.z - baseOrigin.z,
-          },
-        })
+          const updateConfigObj = buildConversionConfig(config, updateDir)
+          const updateOrigin = getCoverageOrigin(updateDir, updateConfigObj)
+          if (!updateOrigin) {
+            throw new Error(`无法确定小范围转换原点: ${updateDir}`)
+          }
+
+          const updateOutputDir = path.join(tempConversionDir, `update_${index}`)
+          emitStdout(params, `小范围转换参数 ${index + 1}/${updateDirs.length}: ${JSON.stringify(updateConfigObj)}\n`)
+          emitStdout(params, `转换小范围 ${index + 1}/${updateDirs.length}: ${updateDir}\n`)
+          await runHeadless3dTileConversion(params, exePath, exeDir, gdalDataPath, updateDir, updateOutputDir, updateConfigObj)
+
+          convertedUpdates.push({
+            outputDir: updateOutputDir,
+            deltaToBase: {
+              x: updateOrigin.x - baseOrigin.x,
+              y: updateOrigin.y - baseOrigin.y,
+              z: updateOrigin.z - baseOrigin.z,
+            },
+          })
+        }
+
+        emitStdout(params, '正在 3D Tiles 层裁剪大范围并合并小范围\n')
+        const mergeResult = mergeConvertedTilesets(
+          baseOutputDir,
+          convertedUpdates,
+          outputDir,
+          config.edge_precision,
+        )
+        emitStdout(
+          params,
+          `3D Tiles 合并完成，边缘精细度 ${mergeResult.edgePrecision}%，覆盖细瓦片 ${mergeResult.coverageTileCount} 个，裁剪大范围瓦片节点 ${mergeResult.removedBaseTiles} 个，接入小范围瓦片节点 ${mergeResult.addedUpdateTiles} 个\n`,
+        )
+        emitStatus(params, 'success')
+        return { success: true, outputDir }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err)
+        emitStatus(params, isCancelled ? 'cancelled' : 'error')
+        return { success: false, error: message, outputDir }
+      } finally {
+        cleanupMergedOsgbInput(tempConversionDir)
       }
+    }
 
-      sender.send('conversion-stdout', '正在 3D Tiles 层裁剪大范围并合并小范围\n')
-      const mergeResult = mergeConvertedTilesets(
-        baseOutputDir,
-        convertedUpdates,
-        outputDir,
-        config.edge_precision,
-      )
-      sender.send(
-        'conversion-stdout',
-        `3D Tiles 合并完成，边缘精细度 ${mergeResult.edgePrecision}%，覆盖细瓦片 ${mergeResult.coverageTileCount} 个，裁剪大范围瓦片节点 ${mergeResult.removedBaseTiles} 个，接入小范围瓦片节点 ${mergeResult.addedUpdateTiles} 个\n`,
-      )
-      sender.send('conversion-status', 'success')
+    const configObj = buildConversionConfig(config, inputDir)
+    emitStatus(params, 'running')
+    try {
+      emitStdout(params, `转换参数: ${JSON.stringify(configObj)}\n`)
+      await runHeadless3dTileConversion(params, exePath, exeDir, gdalDataPath, inputDir, outputDir, configObj)
+      emitStatus(params, 'success')
       return { success: true, outputDir }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
-      sender.send('conversion-status', isCancelled ? 'cancelled' : 'error')
-      return { success: false, error: message }
-    } finally {
-      cleanupMergedOsgbInput(tempConversionDir)
+      emitStatus(params, isCancelled ? 'cancelled' : 'error')
+      return { success: false, error: message, outputDir }
     }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    emitStatus(params, 'error')
+    return { success: false, error: message }
+  } finally {
+    cleanupMergedOsgbInput(preparedDirs?.cleanupDir ?? null)
   }
-
-  if (updateDirs.length > 0) {
-    try {
-      sender.send('conversion-stdout', `开始合并 OSGB 更新目录，共 ${updateDirs.length} 个\n`)
-      const mergeInfo = createMergedOsgbInput(inputDir, updateDirs)
-      conversionInputDir = mergeInfo.inputDir
-      tempMergeDir = mergeInfo.tempDir
-      sender.send(
-        'conversion-stdout',
-        `OSGB 合并完成: 大范围瓦片 ${mergeInfo.baseTileCount} 个，更新瓦片 ${mergeInfo.updateTileCount} 个，替换 ${mergeInfo.replacedTileCount} 个，新增 ${mergeInfo.addedTileCount} 个\n`,
-      )
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err)
-      sender.send('conversion-stderr', `OSGB 合并失败: ${message}`)
-      sender.send('conversion-status', 'error')
-      cleanupMergedOsgbInput(tempMergeDir)
-      return { success: false, error: `OSGB 合并失败: ${message}` }
-    }
-  }
-
-  return new Promise<{ success: boolean; error?: string }>((resolve) => {
-    try {
-      conversionProcess = spawn(exePath, [
-        '-i', conversionInputDir,
-        '-o', outputDir,
-        '-f', 'osgb',
-        '-c', configJson,
-      ], {
-        cwd: exeDir,
-        env: {
-          ...process.env,
-          GDAL_DATA: gdalDataPath,
-          PROJ_LIB: gdalDataPath,
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-      })
-
-      // Stream stdout
-      conversionProcess.stdout?.on('data', (data: Buffer) => {
-        const text = data.toString('utf-8')
-        sender.send('conversion-stdout', text)
-      })
-
-      // Stream stderr
-      conversionProcess.stderr?.on('data', (data: Buffer) => {
-        const text = data.toString('utf-8')
-        sender.send('conversion-stderr', text)
-      })
-
-      // Handle process exit
-      conversionProcess.on('close', (code) => {
-        conversionProcess = null
-        cleanupMergedOsgbInput(tempMergeDir)
-        if (isCancelled) {
-          sender.send('conversion-status', 'cancelled')
-          resolve({ success: false, error: '转换已取消' })
-        } else if (code === 0) {
-          sender.send('conversion-status', 'success')
-          resolve({ success: true, outputDir })
-        } else {
-          sender.send('conversion-status', 'error')
-          resolve({ success: false, error: `转换进程异常退出，退出码: ${code}` })
-        }
-      })
-
-      // Handle process error
-      conversionProcess.on('error', (err) => {
-        conversionProcess = null
-        cleanupMergedOsgbInput(tempMergeDir)
-        const message = err.message.includes('ENOENT')
-          ? `无法启动转换工具: ${exePath}，请确认文件存在`
-          : `启动转换进程失败: ${err.message}`
-        sender.send('conversion-stderr', message)
-        sender.send('conversion-status', 'error')
-        resolve({ success: false, error: message })
-      })
-
-      sender.send('conversion-status', 'running')
-    } catch (err: unknown) {
-      cleanupMergedOsgbInput(tempMergeDir)
-      const message = err instanceof Error ? err.message : String(err)
-      sender.send('conversion-status', 'error')
-      resolve({ success: false, error: `启动转换失败: ${message}` })
-    }
-  })
 }
 
-// Start conversion
-ipcMain.handle('start-conversion', async (event, params: ConversionParams) => {
-  return startConversionTask(event.sender, params)
-})
-
-// Cancel conversion
-ipcMain.handle('cancel-conversion', async () => {
-  if (conversionProcess) {
-    isCancelled = true
-    conversionProcess.kill('SIGTERM')
-    // Force kill after 3 seconds if still running
-    setTimeout(() => {
-      if (conversionProcess) {
-        conversionProcess.kill('SIGKILL')
-        conversionProcess = null
-      }
-    }, 3000)
-    return true
-  }
-  return false
-})
-
-// Check tool exists
-ipcMain.handle('check-tool', async () => {
-  const exePath = get3dtilePath()
-  return {
-    exists: fs.existsSync(exePath),
-    path: exePath,
-  }
-})
-
-// Open output directory in file explorer
-ipcMain.handle('open-output-dir', async (_event, dirPath: string) => {
-  if (fs.existsSync(dirPath)) {
-    shell.openPath(dirPath)
-  }
-})
-
-// Start 3D Tiles preview with Cesium
-ipcMain.handle('start-preview', async (event, params?: {
-  outputDir?: string
-  centerX?: number
-  centerY?: number
-  offset?: number
-}) => {
-  const outDir = params?.outputDir || lastOutputDir
-  const cx = params?.centerX ?? lastConfigX
-  const cy = params?.centerY ?? lastConfigY
-  const heightOffset = params?.offset ?? lastConfigOffset
-
-  if (!outDir) {
-    return { success: false, error: '没有可预览的输出目录' }
-  }
-
-  const tilesetPath = path.join(outDir, 'tileset.json')
-  if (!fs.existsSync(tilesetPath)) {
-    return { success: false, error: `未找到 tileset.json: ${tilesetPath}` }
-  }
-
-  try {
-    // Stop any existing preview server
-    stopStaticServer()
-
-    // Copy preview HTML into output dir so it's served via HTTP (not file://)
-    const previewHtmlPath = getPreviewHtmlPath()
-    if (!fs.existsSync(previewHtmlPath)) {
-      return { success: false, error: `预览页面未找到: ${previewHtmlPath}` }
-    }
-
-    const destPreviewPath = path.join(outDir, 'preview.html')
-    fs.copyFileSync(previewHtmlPath, destPreviewPath)
-
-    // Start HTTP server on a free port (serves 3D tiles data + preview.html)
-    const port = await findFreePort()
-    previewServer = await startStaticServer(outDir, port)
-    previewPort = port
-
-    // Open preview window via HTTP so Cesium workers load correctly
-    const previewUrl = `http://localhost:${port}/preview.html?url=tileset.json&x=${cx}&y=${cy}&h=${heightOffset}`
-
-    const previewWin = new BrowserWindow({
-      title: '3D Tiles 预览 - Cesium',
-      width: 1400,
-      height: 900,
-      minWidth: 800,
-      minHeight: 600,
-      autoHideMenuBar: true,
-      webPreferences: {
-        webSecurity: true,
-      },
-    })
-
-    await previewWin.loadURL(previewUrl)
-
-    // Clean up server + temp preview.html when preview window closes
-    previewWin.on('closed', () => {
-      stopStaticServer()
-      try { fs.unlinkSync(destPreviewPath) } catch {}
-    })
-
-    return { success: true, port, url: `http://localhost:${port}/tileset.json` }
-  } catch (err: unknown) {
-    stopStaticServer()
-    const message = err instanceof Error ? err.message : String(err)
-    return { success: false, error: `启动预览失败: ${message}` }
-  }
-})
-
-// Stop preview server
-ipcMain.handle('stop-preview', async () => {
-  stopStaticServer()
+export function cancelHeadlessMergeUpdate(): boolean {
+  if (!conversionProcess) return false
+  isCancelled = true
+  conversionProcess.kill('SIGTERM')
   return true
-})
-
-// New window example
-ipcMain.handle('open-win', (_, arg) => {
-  const childWindow = new BrowserWindow({
-    webPreferences: {
-      preload,
-      nodeIntegration: true,
-      contextIsolation: false,
-    },
-  })
-
-  if (VITE_DEV_SERVER_URL) {
-    childWindow.loadURL(`${VITE_DEV_SERVER_URL}#${arg}`)
-  } else {
-    childWindow.loadFile(indexHtml, { hash: arg })
-  }
-})
+}

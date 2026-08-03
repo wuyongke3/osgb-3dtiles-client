@@ -24,12 +24,13 @@ interface ConversionConfig {
   y?: number | string
   offset?: number
   max_lvl?: number
+  edge_precision?: number
   pbr?: boolean
 }
 
 interface ConversionParams {
   inputDir: string
-  outputDir: string
+  outputDir?: string
   config: ConversionConfig
   updateDirs?: string[]
 }
@@ -37,6 +38,7 @@ interface ConversionParams {
 interface ConversionResult {
   success: boolean
   error?: string
+  outputDir?: string
 }
 
 interface ToolCheckResult {

@@ -5,6 +5,9 @@ node_modules/
 dist/
 dist-electron/
 release/
+dist-tool-bundle/
+dist-tools/
+dist-tools-exe/
 
 # ── IDE ──
 .vscode/

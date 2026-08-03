@@ -19,6 +19,6 @@
     "isolatedModules": true,
     "noEmit": true,
   },
-  "include": ["src"],
+  "include": ["src", "service/index.ts", "service/mergeUpdateService.ts"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }
