@@ -936,32 +936,80 @@ function getTileContentUri(tile: TileJson): string | null {
   return tile.content?.uri ?? tile.content?.url ?? null
 }
 
-function getBoxBounds(box: number[]): OsgbBounds | null {
+function boundsFromPoints(points: Array<[number, number, number]>): OsgbBounds | null {
+  if (points.length === 0) return null
+  const min = [Infinity, Infinity, Infinity]
+  const max = [-Infinity, -Infinity, -Infinity]
+  for (const point of points) {
+    for (let index = 0; index < 3; index++) {
+      min[index] = Math.min(min[index], point[index])
+      max[index] = Math.max(max[index], point[index])
+    }
+  }
+  return {
+    minX: min[0],
+    maxX: max[0],
+    minY: min[1],
+    maxY: max[1],
+    minZ: min[2],
+    maxZ: max[2],
+  }
+}
+
+function isTransformMatrix(transform: number[] | undefined): transform is number[] {
+  return Array.isArray(transform) && transform.length >= 16
+}
+
+function getCombinedTransform(parentTransform: number[] | undefined, tile: TileJson): number[] | undefined {
+  if (!isTransformMatrix(tile.transform)) return parentTransform
+  return parentTransform ? multiplyTransforms(parentTransform, tile.transform) : tile.transform
+}
+
+function getMaxTransformScale(transform: number[] | undefined): number {
+  if (!isTransformMatrix(transform)) return 1
+  const xScale = Math.hypot(transform[0], transform[1], transform[2])
+  const yScale = Math.hypot(transform[4], transform[5], transform[6])
+  const zScale = Math.hypot(transform[8], transform[9], transform[10])
+  return Math.max(xScale, yScale, zScale, 1e-12)
+}
+
+function getBoxBounds(box: number[], transform?: number[]): OsgbBounds | null {
   if (box.length < 12) return null
   const cx = box[0]
   const cy = box[1]
   const cz = box[2]
-  const hx = Math.abs(box[3]) + Math.abs(box[6]) + Math.abs(box[9])
-  const hy = Math.abs(box[4]) + Math.abs(box[7]) + Math.abs(box[10])
-  const hz = Math.abs(box[5]) + Math.abs(box[8]) + Math.abs(box[11])
-  return {
-    minX: cx - hx,
-    maxX: cx + hx,
-    minY: cy - hy,
-    maxY: cy + hy,
-    minZ: cz - hz,
-    maxZ: cz + hz,
+  const corners: Array<[number, number, number]> = []
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) {
+      for (const sz of [-1, 1]) {
+        corners.push(transformPoint(transform, [
+          cx + sx * box[3] + sy * box[6] + sz * box[9],
+          cy + sx * box[4] + sy * box[7] + sz * box[10],
+          cz + sx * box[5] + sy * box[8] + sz * box[11],
+        ]))
+      }
+    }
   }
+  return boundsFromPoints(corners)
 }
 
-function getTileBounds(tile: TileJson): OsgbBounds | null {
+function getTileBounds(tile: TileJson, transform?: number[]): OsgbBounds | null {
   const volume = tile.boundingVolume ?? tile.content?.boundingVolume
   const box = volume?.box
-  if (box) return getBoxBounds(box)
+  if (box) return getBoxBounds(box, transform)
   const sphere = volume?.sphere
   if (sphere && sphere.length >= 4) {
     const [x, y, z, r] = sphere
-    return { minX: x - r, maxX: x + r, minY: y - r, maxY: y + r, minZ: z - r, maxZ: z + r }
+    const center = transformPoint(transform, [x, y, z])
+    const radius = r * getMaxTransformScale(transform)
+    return {
+      minX: center[0] - radius,
+      maxX: center[0] + radius,
+      minY: center[1] - radius,
+      maxY: center[1] + radius,
+      minZ: center[2] - radius,
+      maxZ: center[2] + radius,
+    }
   }
   return null
 }
@@ -979,6 +1027,10 @@ function translateBounds(bounds: OsgbBounds, delta: CoordinateDelta): OsgbBounds
 
 function coverageContains(bounds: OsgbBounds, coverage: OsgbBounds[]): boolean {
   return coverage.some((cover) => boundsContains(cover, bounds))
+}
+
+function coverageIntersects(bounds: OsgbBounds, coverage: OsgbBounds[]): boolean {
+  return coverage.some((cover) => boundsIntersects(cover, bounds))
 }
 
 function coverageContainsCenter(bounds: OsgbBounds, coverage: OsgbBounds[]): boolean {
@@ -1014,25 +1066,42 @@ function coverageOverlapRatio(bounds: OsgbBounds, coverage: OsgbBounds[]): numbe
   return Math.min(intersectionArea / area, 1)
 }
 
+function normalizeCoverageBounds(boundsList: OsgbBounds[]): OsgbBounds[] {
+  const sorted = [...boundsList].sort((a, b) => boundsArea(b) - boundsArea(a))
+  const result: OsgbBounds[] = []
+
+  for (const bounds of sorted) {
+    if (result.some((cover) => boundsContains(cover, bounds))) {
+      continue
+    }
+    result.push(bounds)
+  }
+
+  return result
+}
+
 function shouldRemoveBaseTile(
   bounds: OsgbBounds,
   coverage: OsgbBounds[],
-  options: EdgePruneOptions,
+  _options: EdgePruneOptions,
 ): boolean {
   if (coverageContains(bounds, coverage)) return true
-
-  const overlapRatio = coverageOverlapRatio(bounds, coverage)
-  if (overlapRatio >= options.removeOverlapRatio) return true
-
-  return coverageContainsCenter(bounds, coverage) && overlapRatio >= options.centerOverlapRatio
+  return coverageIntersects(bounds, coverage)
 }
 
 function collectCoverageFromTileset(tilesetPath: string, deltaToBase: CoordinateDelta): OsgbBounds[] {
   const tileset = readJsonFile<TilesetJson>(tilesetPath)
   const coverage: OsgbBounds[] = []
 
-  const collectTileCoverage = (tile: TileJson, tilesetDir: string): void => {
-    const beforeCount = coverage.length
+  const collectTileCoverage = (
+    tile: TileJson,
+    tilesetDir: string,
+    parentTransform?: number[],
+    includeOwnTransform = true,
+  ): void => {
+    const tileTransform = includeOwnTransform
+      ? getCombinedTransform(parentTransform, tile)
+      : parentTransform
     const uri = getTileContentUri(tile)
     const isExternalTileset = !!uri && uri.toLowerCase().endsWith('tileset.json')
 
@@ -1041,21 +1110,23 @@ function collectCoverageFromTileset(tilesetPath: string, deltaToBase: Coordinate
       if (fs.existsSync(externalPath)) {
         const externalTileset = readJsonFile<TilesetJson>(externalPath)
         if (externalTileset.root) {
-          collectTileCoverage(externalTileset.root, path.dirname(externalPath))
+          collectTileCoverage(externalTileset.root, path.dirname(externalPath), tileTransform)
         }
       }
     }
 
-    tile.children?.forEach((child) => collectTileCoverage(child, tilesetDir))
-
-    if (coverage.length === beforeCount && tile.content && !isExternalTileset) {
-      const bounds = getTileBounds(tile)
+    if (tile.content && !isExternalTileset) {
+      const bounds = getTileBounds(tile, tileTransform)
       if (bounds) coverage.push(translateBounds(bounds, deltaToBase))
     }
+
+    tile.children?.forEach((child) => collectTileCoverage(child, tilesetDir, tileTransform))
   }
 
   if (tileset.root) {
-    collectTileCoverage(tileset.root, path.dirname(tilesetPath))
+    // The top-level transform georeferences the whole tileset. Coverage is
+    // compared in the base tileset's local merge coordinate space instead.
+    collectTileCoverage(tileset.root, path.dirname(tilesetPath), undefined, false)
   }
 
   return coverage
@@ -1065,27 +1136,37 @@ function pruneTilesetFile(
   tilesetPath: string,
   coverage: OsgbBounds[],
   options: EdgePruneOptions,
+  parentTransform?: number[],
+  skipRootTransform = false,
 ): { removed: number; empty: boolean } {
   const tileset = readJsonFile<TilesetJson>(tilesetPath)
   const tilesetDir = path.dirname(tilesetPath)
   let removed = 0
 
-  const pruneTile = (tile: TileJson): boolean => {
-    const bounds = getTileBounds(tile)
+  const pruneTile = (
+    tile: TileJson,
+    inheritedTransform: number[] | undefined,
+    keepTile: boolean,
+    skipOwnTransform = false,
+  ): boolean => {
+    const tileTransform = skipOwnTransform
+      ? inheritedTransform
+      : getCombinedTransform(inheritedTransform, tile)
+    const bounds = getTileBounds(tile, tileTransform)
     const uri = getTileContentUri(tile)
     const isExternalTileset = !!uri && uri.toLowerCase().endsWith('tileset.json')
 
     if (isExternalTileset && uri) {
       const externalPath = path.resolve(tilesetDir, uri)
       if (fs.existsSync(externalPath)) {
-        const childResult = pruneTilesetFile(externalPath, coverage, options)
+        const childResult = pruneTilesetFile(externalPath, coverage, options, tileTransform)
         removed += childResult.removed
         if (childResult.empty) return false
       }
     }
 
     if (tile.children) {
-      tile.children = tile.children.filter(pruneTile)
+      tile.children = tile.children.filter((child) => pruneTile(child, tileTransform, false))
       if (tile.children.length === 0) delete tile.children
     }
 
@@ -1094,7 +1175,7 @@ function pruneTilesetFile(
     )
 
     if (bounds && removeTile) {
-      if (tile.children && tile.children.length > 0 && !isExternalTileset) {
+      if ((keepTile || (tile.children && tile.children.length > 0)) && !isExternalTileset) {
         if (tile.content) {
           delete tile.content
           removed++
@@ -1109,8 +1190,8 @@ function pruneTilesetFile(
     return true
   }
 
-  if (tileset.root?.children) {
-    tileset.root.children = tileset.root.children.filter(pruneTile)
+  if (tileset.root) {
+    pruneTile(tileset.root, parentTransform, true, skipRootTransform)
   }
 
   const rootEmpty = !tileset.root?.content && (!tileset.root?.children || tileset.root.children.length === 0)
@@ -1178,6 +1259,13 @@ function rewriteTileContentUris(tile: TileJson, updateDataName: string): void {
   }
 
   tile.children?.forEach((child) => rewriteTileContentUris(child, updateDataName))
+}
+
+function normalizeTileBoundingVolume(tile: TileJson): void {
+  const bounds = getTileBounds(tile)
+  if (bounds) {
+    tile.boundingVolume = { box: boundsToBox(bounds) }
+  }
 }
 
 function unionBounds(boundsList: OsgbBounds[]): OsgbBounds | null {
@@ -1285,11 +1373,11 @@ function mergeConvertedTilesets(
   fs.cpSync(baseOutputDir, outputDir, { recursive: true })
   const edgeOptions = buildEdgePruneOptions(edgePrecisionValue)
 
-  const coverage = updateOutputDirs.flatMap((update) => (
+  const coverage = normalizeCoverageBounds(updateOutputDirs.flatMap((update) => (
     collectCoverageFromTileset(path.join(update.outputDir, 'tileset.json'), update.deltaToBase)
-  ))
+  )))
   const outputTilesetPath = path.join(outputDir, 'tileset.json')
-  const pruneResult = pruneTilesetFile(outputTilesetPath, coverage, edgeOptions)
+  const pruneResult = pruneTilesetFile(outputTilesetPath, coverage, edgeOptions, undefined, true)
   const mergedTileset = readJsonFile<TilesetJson>(outputTilesetPath)
   const root = mergedTileset.root
   if (!root) throw new Error('大范围转换结果缺少 root tileset')
@@ -1311,15 +1399,14 @@ function mergeConvertedTilesets(
       fs.cpSync(updateDataSourceDir, updateDataTargetDir, { recursive: true })
     }
 
-    const updateTransform = makeTranslationTransform(update.deltaToBase)
-    const sourceTiles = updateRoot.children && updateRoot.children.length > 0 ? updateRoot.children : [updateRoot]
-    for (const sourceTile of sourceTiles) {
-      const graftedTile = cloneTile(sourceTile)
-      mergeTileTransform(graftedTile, updateTransform)
-      rewriteTileContentUris(graftedTile, updateDataName)
-      rootChildren.push(graftedTile)
-      addedUpdateTiles++
-    }
+    const graftedTile = cloneTile(updateRoot)
+    // The update root has its own top-level georeference. It must be replaced
+    // by the base-local delta when grafted under the base root.
+    graftedTile.transform = makeTranslationTransform(update.deltaToBase)
+    normalizeTileBoundingVolume(graftedTile)
+    rewriteTileContentUris(graftedTile, updateDataName)
+    rootChildren.push(graftedTile)
+    addedUpdateTiles++
   })
 
   root.children = rootChildren

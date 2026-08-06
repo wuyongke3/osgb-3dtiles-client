@@ -48,6 +48,78 @@
     }
     .status-toggle:hover { background: rgba(35,53,72,0.82); }
 
+    .tiles-control-panel {
+      position: absolute; left: 20px; bottom: 24px; z-index: 12;
+      width: min(360px, calc(100vw - 40px));
+      padding: 14px 16px 16px;
+      border: 1px solid rgba(121,148,178,0.28);
+      border-radius: 8px;
+      background: rgba(10,17,26,0.86);
+      box-shadow: 0 16px 40px rgba(0,0,0,0.32);
+      color: #d9e7f4;
+      font-family: 'Segoe UI','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+      backdrop-filter: blur(8px);
+    }
+    .control-header {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; margin-bottom: 14px;
+    }
+    .control-title {
+      margin: 0;
+      color: #f2f7fc;
+      font-size: 14px;
+      line-height: 1.35;
+      font-weight: 600;
+    }
+    .control-reset {
+      flex: 0 0 auto;
+      border: 1px solid rgba(121,148,178,0.36);
+      border-radius: 6px;
+      background: rgba(16,25,35,0.72);
+      color: #d8e6f3;
+      padding: 5px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .control-reset:hover { background: rgba(35,53,72,0.82); }
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .control-group + .control-group { margin-top: 12px; }
+    .control-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      color: #d9e7f4;
+      font-size: 13px;
+    }
+    .control-value {
+      color: #8ca2b8;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    .control-inputs {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 68px;
+      gap: 10px;
+      align-items: center;
+    }
+    .control-inputs input[type="range"] {
+      width: 100%;
+      accent-color: #4a90d9;
+    }
+    .control-inputs input[type="number"] {
+      width: 68px;
+      border: 1px solid rgba(121,148,178,0.32);
+      border-radius: 6px;
+      background: rgba(5,8,12,0.72);
+      color: #f2f7fc;
+      padding: 7px 8px;
+      font-size: 13px;
+      outline: none;
+    }
+    .control-inputs input:focus { border-color: #4a90d9; }
+
     .tile-status-panel {
       position: absolute; top: 58px; right: 20px; z-index: 11;
       width: min(380px, calc(100vw - 40px));
@@ -165,7 +237,15 @@
         left: 12px;
         width: auto;
       }
+      .tiles-control-panel {
+        right: 12px;
+        left: 12px;
+        bottom: 16px;
+        width: auto;
+      }
       .status-grid { grid-template-columns: 1fr; }
+      .control-inputs { grid-template-columns: 1fr; }
+      .control-inputs input[type="number"] { width: 100%; }
     }
   </style>
 </head>
@@ -179,6 +259,43 @@
       <span id="coordLabel"></span>
       <button class="status-toggle" id="statusToggle" type="button">隐藏状态</button>
     </span>
+  </div>
+
+  <div class="tiles-control-panel" id="tilesControlPanel">
+    <div class="control-header">
+      <h2 class="control-title">3D Tiles 预览控制</h2>
+      <button class="control-reset" id="visualReset" type="button">恢复默认</button>
+    </div>
+    <div class="control-group">
+      <div class="control-row">
+        <label for="visualOpacity">透明度</label>
+        <span class="control-value" id="opacityValue">100%</span>
+      </div>
+      <div class="control-inputs">
+        <input id="visualOpacity" type="range" min="1" max="100" step="1" value="100" />
+        <input id="visualOpacityNumber" type="number" min="1" max="100" step="1" value="100" />
+      </div>
+    </div>
+    <div class="control-group">
+      <div class="control-row">
+        <label for="visualBrightness">亮度</label>
+        <span class="control-value" id="brightnessValue">100%</span>
+      </div>
+      <div class="control-inputs">
+        <input id="visualBrightness" type="range" min="1" max="200" step="1" value="100" />
+        <input id="visualBrightnessNumber" type="number" min="1" max="200" step="1" value="100" />
+      </div>
+    </div>
+    <div class="control-group">
+      <div class="control-row">
+        <label for="wheelSensitivity">滚轮灵敏度</label>
+        <span class="control-value" id="wheelSensitivityValue">100%</span>
+      </div>
+      <div class="control-inputs">
+        <input id="wheelSensitivity" type="range" min="25" max="300" step="5" value="100" />
+        <input id="wheelSensitivityNumber" type="number" min="25" max="300" step="5" value="100" />
+      </div>
+    </div>
   </div>
 
   <div class="tile-status-panel" id="tileStatusPanel">
@@ -229,6 +346,16 @@
     var coordLabel = document.getElementById('coordLabel')
     var statusToggle = document.getElementById('statusToggle')
     var tileStatusPanel = document.getElementById('tileStatusPanel')
+    var visualReset = document.getElementById('visualReset')
+    var visualOpacity = document.getElementById('visualOpacity')
+    var visualOpacityNumber = document.getElementById('visualOpacityNumber')
+    var visualBrightness = document.getElementById('visualBrightness')
+    var visualBrightnessNumber = document.getElementById('visualBrightnessNumber')
+    var wheelSensitivity = document.getElementById('wheelSensitivity')
+    var wheelSensitivityNumber = document.getElementById('wheelSensitivityNumber')
+    var opacityValue = document.getElementById('opacityValue')
+    var brightnessValue = document.getElementById('brightnessValue')
+    var wheelSensitivityValue = document.getElementById('wheelSensitivityValue')
     var loadState = document.getElementById('loadState')
     var networkValue = document.getElementById('networkValue')
     var networkFailedValue = document.getElementById('networkFailedValue')
@@ -258,6 +385,117 @@
     var statusRenderQueued = false
     var visibleTilesThisFrame = 0
     var cesiumLoadTimer = null
+    var activeTilesets = []
+    var activeCameraController = null
+    var defaultZoomFactor = 5.0
+    var visualState = {
+      opacityPercent: 100,
+      brightnessPercent: 100,
+      wheelSensitivityPercent: 100,
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value))
+    }
+
+    function clampOpacityPercent(value) {
+      return clamp(Math.round(Number(value) || 100), 1, 100)
+    }
+
+    function clampBrightnessPercent(value) {
+      return clamp(Math.round(Number(value) || 100), 1, 200)
+    }
+
+    function clampWheelSensitivityPercent(value) {
+      return clamp(Math.round(Number(value) || 100), 25, 300)
+    }
+
+    function syncVisualLabels() {
+      opacityValue.textContent = visualState.opacityPercent + '%'
+      brightnessValue.textContent = visualState.brightnessPercent + '%'
+      visualOpacity.value = String(visualState.opacityPercent)
+      visualOpacityNumber.value = String(visualState.opacityPercent)
+      visualBrightness.value = String(visualState.brightnessPercent)
+      visualBrightnessNumber.value = String(visualState.brightnessPercent)
+      wheelSensitivityValue.textContent = visualState.wheelSensitivityPercent + '%'
+      wheelSensitivity.value = String(visualState.wheelSensitivityPercent)
+      wheelSensitivityNumber.value = String(visualState.wheelSensitivityPercent)
+    }
+
+    function createVisualShader() {
+      var opacity = visualState.opacityPercent / 100
+      var brightness = visualState.brightnessPercent / 100
+      return new Cesium.CustomShader({
+        mode: Cesium.CustomShaderMode.MODIFY_MATERIAL,
+        translucencyMode: Cesium.CustomShaderTranslucencyMode.TRANSLUCENT,
+        uniforms: {
+          u_opacity: { type: Cesium.UniformType.FLOAT, value: opacity },
+          u_brightness: { type: Cesium.UniformType.FLOAT, value: brightness },
+        },
+        fragmentShaderText: [
+          'void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material)',
+          '{',
+          '  material.diffuse = clamp(material.diffuse * u_brightness, vec3(0.0), vec3(1.0));',
+          '  material.alpha *= u_opacity;',
+          '}',
+        ].join('\n'),
+      })
+    }
+
+    function applyVisualState() {
+      for (var i = 0; i < activeTilesets.length; i += 1) {
+        var target = activeTilesets[i]
+        if (!target) continue
+        if (target.__tilesVisualShader && target.customShader === target.__tilesVisualShader) {
+          target.customShader.setUniform('u_opacity', visualState.opacityPercent / 100)
+          target.customShader.setUniform('u_brightness', visualState.brightnessPercent / 100)
+        } else {
+          target.customShader = createVisualShader()
+          target.__tilesVisualShader = target.customShader
+          target.style = undefined
+        }
+      }
+      syncVisualLabels()
+    }
+
+    function setOpacityPercent(value) {
+      visualState.opacityPercent = clampOpacityPercent(value)
+      applyVisualState()
+    }
+
+    function setBrightnessPercent(value) {
+      visualState.brightnessPercent = clampBrightnessPercent(value)
+      applyVisualState()
+    }
+
+    function setWheelSensitivityPercent(value) {
+      visualState.wheelSensitivityPercent = clampWheelSensitivityPercent(value)
+      if (activeCameraController) {
+        activeCameraController.zoomFactor = defaultZoomFactor * visualState.wheelSensitivityPercent / 100
+      }
+      syncVisualLabels()
+    }
+
+    function bindControlInput(rangeEl, numberEl, applyFn) {
+      rangeEl.addEventListener('input', function () {
+        applyFn(rangeEl.value)
+      })
+      numberEl.addEventListener('input', function () {
+        applyFn(numberEl.value)
+      })
+    }
+
+    syncVisualLabels()
+    bindControlInput(visualOpacity, visualOpacityNumber, setOpacityPercent)
+    bindControlInput(visualBrightness, visualBrightnessNumber, setBrightnessPercent)
+    bindControlInput(wheelSensitivity, wheelSensitivityNumber, setWheelSensitivityPercent)
+    visualReset.addEventListener('click', function () {
+      visualState.opacityPercent = 100
+      visualState.brightnessPercent = 100
+      visualState.wheelSensitivityPercent = 100
+      applyVisualState()
+      setWheelSensitivityPercent(100)
+    })
 
     function isTileAssetUrl(url) {
       var text = String(url || '')
@@ -474,6 +712,8 @@
           selectionIndicator: true,
           sceneMode: Cesium.SceneMode.SCENE3D,
         })
+        activeCameraController = viewer.scene.screenSpaceCameraController
+        setWheelSensitivityPercent(visualState.wheelSensitivityPercent)
 
         // Hide credit container
         try {
@@ -505,15 +745,18 @@
         setPhase('请求 tileset', '正在请求 tileset.json: ' + compactUrl(tilesetUrl))
         Cesium.Cesium3DTileset.fromUrl(tilesetUrl, {
           maximumScreenSpaceError: 16,
-          skipLevelOfDetail: true,
-          baseScreenSpaceError: 1024,
-          skipScreenSpaceErrorFactor: 16,
-          immediatelyLoadDesiredLevelOfDetail: false,
-          loadSiblings: false,
+          skipLevelOfDetail: false,
+          preloadFlightDestinations: true,
+          preferLeaves: false,
+          dynamicScreenSpaceError: false,
+          foveatedScreenSpaceError: false,
+          cullRequestsWhileMoving: false,
           cullWithChildrenBounds: true,
         })
           .then(function (tileset) {
             viewer.scene.primitives.add(tileset)
+            activeTilesets = [tileset]
+            applyVisualState()
             setPhase('加载瓦片', 'tileset.json 已载入，正在请求首屏瓦片...')
 
             tileset.loadProgress.addEventListener(function (numberOfPendingRequests, numberOfTilesProcessing) {
