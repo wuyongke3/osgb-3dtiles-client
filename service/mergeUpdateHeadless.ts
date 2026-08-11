@@ -2,6 +2,7 @@ import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { aggregateTiles } from './tileAggregator.js'
 
 function getDefaultOutputDir(inputDir: string): string {
   const resolvedInputDir = path.resolve(inputDir)
@@ -50,6 +51,7 @@ interface EdgePruneOptions {
   edgePrecision: number
   removeOverlapRatio: number
   centerOverlapRatio: number
+  edgeSeamRatio: number
 }
 
 interface OsgbMergeInfo {
@@ -63,6 +65,7 @@ interface OsgbMergeInfo {
 
 const PAGED_LOD_MARKER = Buffer.from('osg::PagedLOD')
 const VEC3_ARRAY_MARKER = Buffer.from('osg::Vec3Array')
+const DEFAULT_OUTPUT_TRANSPARENCY_OPACITY = 50
 
 function isLikelyGeographicSrs(srs: string | null): boolean {
   return /EPSG\s*:\s*(4326|4490|4610|4269|4258)\b/i.test(srs ?? '')
@@ -281,7 +284,14 @@ function buildEdgePruneOptions(edgePrecisionValue: unknown): EdgePruneOptions {
   return {
     edgePrecision,
     removeOverlapRatio,
-    centerOverlapRatio: Math.max(removeOverlapRatio - 0.2, 0.5),
+    // Center-overlap threshold: if the update coverage contains the tile center
+    // and covers at least 25-35% of it, remove the old tile content so updated
+    // data is not hidden under stale base tiles. Lower than the edge precision
+    // ratio on purpose (base tiles are usually larger than the update area).
+    centerOverlapRatio: Math.max(removeOverlapRatio - 0.5, 0.25),
+    // Edge stitching ratio: a non-leaf tile's stale content is removed when its
+    // kept children cover this fraction of the part outside the update area.
+    edgeSeamRatio: 0.95,
   }
 }
 
@@ -893,6 +903,238 @@ function writeJsonFile(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8')
 }
 
+function padBuffer(buffer: Buffer, paddingByte: number): Buffer {
+  const paddingLength = (4 - (buffer.length % 4)) % 4
+  if (paddingLength === 0) return buffer
+  return Buffer.concat([buffer, Buffer.alloc(paddingLength, paddingByte)])
+}
+
+function parseGltfJson(buffer: Buffer): Record<string, unknown> {
+  const text = buffer.toString('utf-8').replace(/[\u0000\s]+$/g, '')
+  return JSON.parse(text) as Record<string, unknown>
+}
+
+function normalizeOutputOpacity(value: unknown): number {
+  if (value === true) return 100
+  if (value === false || value === null) return 100
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return 100
+  return Math.min(Math.max(numeric, 1), 100)
+}
+
+function shouldEnableOutputTransparency(config: HeadlessMergeUpdateConfig): boolean {
+  return config.output_transparency === true || normalizeOutputOpacity(config.output_opacity) < 100
+}
+
+// null: add transparency attributes only (BLEND + baseColorFactor), alpha stays 1 (opaque), later controlled by preview slider.
+// number: target alpha ratio (explicit output_opacity < 100 writes semi-transparent alpha).
+function getOutputOpacityRatio(config: HeadlessMergeUpdateConfig): number | null {
+  if (config.output_transparency === true) return null
+  const opacity = normalizeOutputOpacity(config.output_opacity)
+  return opacity < 100 ? opacity / 100 : null
+}
+
+function applyGltfOpacity(gltf: Record<string, unknown>, opacityRatio: number | null): boolean {
+  const materials = Array.isArray(gltf.materials)
+    ? gltf.materials as Array<Record<string, unknown>>
+    : []
+  const meshes = Array.isArray(gltf.meshes)
+    ? gltf.meshes as Array<Record<string, unknown>>
+    : []
+
+  if (materials.length === 0 && meshes.length === 0) return false
+
+  for (const material of materials) {
+    const pbr = material.pbrMetallicRoughness && typeof material.pbrMetallicRoughness === 'object'
+      ? material.pbrMetallicRoughness as Record<string, unknown>
+      : {}
+    const factor = Array.isArray(pbr.baseColorFactor)
+      ? [...pbr.baseColorFactor as number[]]
+      : [1, 1, 1, 1]
+
+    while (factor.length < 4) factor.push(1)
+    if (opacityRatio !== null) {
+      factor[3] = Math.min(Math.max(Number(factor[3] ?? 1), 0), 1) * opacityRatio
+      // BLEND is only enabled when an explicit semi-transparent alpha is written.
+      // Keeping the material OPAQUE when alpha stays 1 avoids the translucent
+      // rendering pass (no depth writes) that causes visible gaps between tiles.
+      material.alphaMode = 'BLEND'
+    }
+    pbr.baseColorFactor = factor
+    material.pbrMetallicRoughness = pbr
+  }
+
+  if (opacityRatio !== null) {
+    let defaultTransparentMaterialIndex: number | null = null
+    for (const mesh of meshes) {
+      const primitives = Array.isArray(mesh.primitives)
+        ? mesh.primitives as Array<Record<string, unknown>>
+        : []
+
+      for (const primitive of primitives) {
+        if (primitive.material !== undefined) continue
+        if (defaultTransparentMaterialIndex === null) {
+          defaultTransparentMaterialIndex = materials.length
+          materials.push({
+            pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, opacityRatio] },
+            alphaMode: 'BLEND',
+          })
+        }
+        primitive.material = defaultTransparentMaterialIndex
+      }
+    }
+  }
+
+  gltf.materials = materials
+  return true
+}
+
+function rewriteGlbOpacity(buffer: Buffer, opacityRatio: number | null): Buffer | null {
+  if (buffer.length < 20 || buffer.toString('ascii', 0, 4) !== 'glTF') return null
+
+  const version = buffer.readUInt32LE(4)
+  if (version === 2) {
+    const chunks: Array<{ type: number; data: Buffer }> = []
+    let jsonChunkIndex = -1
+    let offset = 12
+
+    while (offset + 8 <= buffer.length) {
+      const chunkLength = buffer.readUInt32LE(offset)
+      const chunkType = buffer.readUInt32LE(offset + 4)
+      const dataStart = offset + 8
+      const dataEnd = dataStart + chunkLength
+      if (dataEnd > buffer.length) return null
+
+      if (chunkType === 0x4E4F534A && jsonChunkIndex === -1) {
+        jsonChunkIndex = chunks.length
+      }
+      chunks.push({ type: chunkType, data: buffer.subarray(dataStart, dataEnd) })
+      offset = dataEnd
+    }
+
+    if (jsonChunkIndex < 0) return null
+    const gltf = parseGltfJson(chunks[jsonChunkIndex]!.data)
+    if (!applyGltfOpacity(gltf, opacityRatio)) return null
+
+    chunks[jsonChunkIndex] = {
+      type: 0x4E4F534A,
+      data: padBuffer(Buffer.from(JSON.stringify(gltf), 'utf-8'), 0x20),
+    }
+
+    const totalLength = 12 + chunks.reduce((total, chunk) => total + 8 + chunk.data.length, 0)
+    const result = Buffer.alloc(totalLength)
+    result.write('glTF', 0, 'ascii')
+    result.writeUInt32LE(2, 4)
+    result.writeUInt32LE(totalLength, 8)
+
+    let writeOffset = 12
+    for (const chunk of chunks) {
+      result.writeUInt32LE(chunk.data.length, writeOffset)
+      result.writeUInt32LE(chunk.type, writeOffset + 4)
+      chunk.data.copy(result, writeOffset + 8)
+      writeOffset += 8 + chunk.data.length
+    }
+    return result
+  }
+
+  if (version === 1) {
+    const contentLength = buffer.readUInt32LE(12)
+    const contentFormat = buffer.readUInt32LE(16)
+    const contentStart = 20
+    const contentEnd = contentStart + contentLength
+    if (contentFormat !== 0 || contentEnd > buffer.length) return null
+
+    const gltf = parseGltfJson(buffer.subarray(contentStart, contentEnd))
+    if (!applyGltfOpacity(gltf, opacityRatio)) return null
+
+    const jsonBuffer = padBuffer(Buffer.from(JSON.stringify(gltf), 'utf-8'), 0x20)
+    const bodyBuffer = buffer.subarray(contentEnd)
+    const totalLength = 20 + jsonBuffer.length + bodyBuffer.length
+    const result = Buffer.alloc(totalLength)
+    result.write('glTF', 0, 'ascii')
+    result.writeUInt32LE(1, 4)
+    result.writeUInt32LE(totalLength, 8)
+    result.writeUInt32LE(jsonBuffer.length, 12)
+    result.writeUInt32LE(0, 16)
+    jsonBuffer.copy(result, 20)
+    bodyBuffer.copy(result, 20 + jsonBuffer.length)
+    return result
+  }
+
+  return null
+}
+
+function getB3dmGlbOffset(buffer: Buffer): number | null {
+  if (buffer.length < 28 || buffer.toString('ascii', 0, 4) !== 'b3dm') return null
+  const featureTableJsonLength = buffer.readUInt32LE(12)
+  const featureTableBinaryLength = buffer.readUInt32LE(16)
+  const batchTableJsonLength = buffer.readUInt32LE(20)
+  const batchTableBinaryLength = buffer.readUInt32LE(24)
+  const glbOffset = 28 + featureTableJsonLength + featureTableBinaryLength + batchTableJsonLength + batchTableBinaryLength
+  if (glbOffset + 12 > buffer.length || buffer.toString('ascii', glbOffset, glbOffset + 4) !== 'glTF') {
+    return null
+  }
+  return glbOffset
+}
+
+function rewriteB3dmOpacity(buffer: Buffer, opacityRatio: number | null): Buffer | null {
+  const glbOffset = getB3dmGlbOffset(buffer)
+  if (glbOffset === null) return null
+
+  const rewrittenGlb = rewriteGlbOpacity(buffer.subarray(glbOffset), opacityRatio)
+  if (!rewrittenGlb) return null
+
+  const result = Buffer.concat([buffer.subarray(0, glbOffset), rewrittenGlb])
+  result.writeUInt32LE(result.length, 8)
+  return result
+}
+
+function applyOutputTransparency(outputDir: string, config: HeadlessMergeUpdateConfig): {
+  enabled: boolean
+  opacity: number
+  processed: number
+  skipped: number
+} {
+  const opacity = config.output_transparency === true ? 100 : normalizeOutputOpacity(config.output_opacity)
+  if (!shouldEnableOutputTransparency(config)) return { enabled: false, opacity, processed: 0, skipped: 0 }
+  const opacityRatio = getOutputOpacityRatio(config)
+
+  let processed = 0
+  let skipped = 0
+
+  const visit = (dirPath: string): void => {
+    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+      const entryPath = path.join(dirPath, entry.name)
+      if (entry.isDirectory()) {
+        visit(entryPath)
+        continue
+      }
+      if (!entry.isFile()) continue
+
+      const lowerName = entry.name.toLowerCase()
+      if (!lowerName.endsWith('.b3dm') && !lowerName.endsWith('.glb')) continue
+
+      try {
+        const source = fs.readFileSync(entryPath)
+        const rewritten = lowerName.endsWith('.b3dm')
+          ? rewriteB3dmOpacity(source, opacityRatio)
+          : rewriteGlbOpacity(source, opacityRatio)
+        if (rewritten) {
+          fs.writeFileSync(entryPath, rewritten)
+          processed++
+        } else {
+          skipped++
+        }
+      } catch {
+        skipped++
+      }
+    }
+  }
+
+  visit(outputDir)
+  return { enabled: true, opacity, processed, skipped }
+}
+
 function buildConversionConfig(
   config: { x?: number | string; y?: number | string; offset?: number; max_lvl?: number; pbr?: boolean },
   metadataDir?: string,
@@ -1048,22 +1290,63 @@ function boundsArea(bounds: OsgbBounds): number {
   return Math.max(bounds.maxX - bounds.minX, 0) * Math.max(bounds.maxY - bounds.minY, 0)
 }
 
-function boundsIntersectionArea(a: OsgbBounds, b: OsgbBounds): number {
-  const width = Math.max(Math.min(a.maxX, b.maxX) - Math.max(a.minX, b.minX), 0)
-  const height = Math.max(Math.min(a.maxY, b.maxY) - Math.max(a.minY, b.minY), 0)
-  return width * height
+function unionIntersectionArea(bounds: OsgbBounds, coverage: OsgbBounds[]): number {
+  const intersections = coverage
+    .filter((cover) => boundsIntersects(cover, bounds))
+    .map((cover) => ({
+      minX: Math.max(bounds.minX, cover.minX),
+      maxX: Math.min(bounds.maxX, cover.maxX),
+      minY: Math.max(bounds.minY, cover.minY),
+      maxY: Math.min(bounds.maxY, cover.maxY),
+    }))
+    .filter((rect) => rect.maxX > rect.minX && rect.maxY > rect.minY)
+
+  if (intersections.length === 0) return 0
+
+  const xStops = Array.from(new Set(intersections.flatMap((rect) => [rect.minX, rect.maxX]))).sort((a, b) => a - b)
+  let totalArea = 0
+
+  for (let index = 0; index < xStops.length - 1; index++) {
+    const minX = xStops[index]!
+    const maxX = xStops[index + 1]!
+    const width = maxX - minX
+    if (width <= 0) continue
+
+    const yRanges = intersections
+      .filter((rect) => rect.minX < maxX && rect.maxX > minX)
+      .map((rect) => [rect.minY, rect.maxY] as const)
+      .sort((a, b) => a[0] - b[0])
+
+    let coveredHeight = 0
+    let currentMin: number | null = null
+    let currentMax: number | null = null
+    for (const [rangeMin, rangeMax] of yRanges) {
+      if (currentMin === null || currentMax === null) {
+        currentMin = rangeMin
+        currentMax = rangeMax
+      } else if (rangeMin <= currentMax) {
+        currentMax = Math.max(currentMax, rangeMax)
+      } else {
+        coveredHeight += currentMax - currentMin
+        currentMin = rangeMin
+        currentMax = rangeMax
+      }
+    }
+    if (currentMin !== null && currentMax !== null) {
+      coveredHeight += currentMax - currentMin
+    }
+
+    totalArea += width * coveredHeight
+  }
+
+  return totalArea
 }
 
 function coverageOverlapRatio(bounds: OsgbBounds, coverage: OsgbBounds[]): number {
   const area = boundsArea(bounds)
   if (area <= 0) return 0
 
-  const intersectionArea = coverage.reduce((totalArea, cover) => {
-    if (!boundsIntersects(cover, bounds)) return totalArea
-    return totalArea + boundsIntersectionArea(cover, bounds)
-  }, 0)
-
-  return Math.min(intersectionArea / area, 1)
+  return Math.min(unionIntersectionArea(bounds, coverage) / area, 1)
 }
 
 function normalizeCoverageBounds(boundsList: OsgbBounds[]): OsgbBounds[] {
@@ -1080,13 +1363,54 @@ function normalizeCoverageBounds(boundsList: OsgbBounds[]): OsgbBounds[] {
   return result
 }
 
+function coverageOutsideCoveredBy(
+  bounds: OsgbBounds,
+  coverage: OsgbBounds[],
+  keptBounds: OsgbBounds[],
+): number {
+  const width = bounds.maxX - bounds.minX
+  const height = bounds.maxY - bounds.minY
+  if (width <= 0 || height <= 0) return 1
+  const cell = Math.max(width, height) / 8
+  let outside = 0
+  let covered = 0
+  for (let x = bounds.minX; x <= bounds.maxX - 0.001; x += cell) {
+    for (let y = bounds.minY; y <= bounds.maxY - 0.001; y += cell) {
+      const px = x + cell / 2
+      const py = y + cell / 2
+      if (coverage.some((c) => px >= c.minX && px <= c.maxX && py >= c.minY && py <= c.maxY)) continue
+      outside++
+      if (keptBounds.some((k) => px >= k.minX && px <= k.maxX && py >= k.minY && py <= k.maxY)) covered++
+    }
+  }
+  return outside === 0 ? 1 : covered / outside
+}
+
 function shouldRemoveBaseTile(
   bounds: OsgbBounds,
   coverage: OsgbBounds[],
-  _options: EdgePruneOptions,
+  options: EdgePruneOptions,
+  hasChildren: boolean,
+  keptChildBounds: OsgbBounds[],
 ): boolean {
   if (coverageContains(bounds, coverage)) return true
-  return coverageIntersects(bounds, coverage)
+  if (!coverageIntersects(bounds, coverage)) return false
+
+  if (hasChildren) {
+    // Hole-avoidance first: remove the stale content only when the update area
+    // contains this tile's center AND the kept children cover at least
+    // edgeSeamRatio of the part outside the update area. Otherwise keep it so
+    // the update boundary never becomes a visible hole.
+    return (
+      coverageContainsCenter(bounds, coverage) &&
+      coverageOutsideCoveredBy(bounds, coverage, keptChildBounds) >= options.edgeSeamRatio
+    )
+  }
+
+  // Leaf tiles: only remove them when they are almost entirely covered by the
+  // update area (>= max(edge precision ratio, 0.95)). Removing a leaf that is
+  // mostly outside the coverage would punch a visible hole at the boundary.
+  return coverageOverlapRatio(bounds, coverage) >= Math.max(options.removeOverlapRatio, 0.95)
 }
 
 function collectCoverageFromTileset(tilesetPath: string, deltaToBase: CoordinateDelta): OsgbBounds[] {
@@ -1098,29 +1422,39 @@ function collectCoverageFromTileset(tilesetPath: string, deltaToBase: Coordinate
     tilesetDir: string,
     parentTransform?: number[],
     includeOwnTransform = true,
-  ): void => {
+  ): boolean => {
     const tileTransform = includeOwnTransform
       ? getCombinedTransform(parentTransform, tile)
       : parentTransform
     const uri = getTileContentUri(tile)
     const isExternalTileset = !!uri && uri.toLowerCase().endsWith('tileset.json')
+    let collectedDescendant = false
 
     if (isExternalTileset && uri) {
       const externalPath = path.resolve(tilesetDir, uri)
       if (fs.existsSync(externalPath)) {
         const externalTileset = readJsonFile<TilesetJson>(externalPath)
         if (externalTileset.root) {
-          collectTileCoverage(externalTileset.root, path.dirname(externalPath), tileTransform)
+          collectedDescendant = collectTileCoverage(externalTileset.root, path.dirname(externalPath), tileTransform) || collectedDescendant
         }
       }
     }
 
-    if (tile.content && !isExternalTileset) {
-      const bounds = getTileBounds(tile, tileTransform)
-      if (bounds) coverage.push(translateBounds(bounds, deltaToBase))
+    if (tile.children) {
+      for (const child of tile.children) {
+        collectedDescendant = collectTileCoverage(child, tilesetDir, tileTransform) || collectedDescendant
+      }
     }
 
-    tile.children?.forEach((child) => collectTileCoverage(child, tilesetDir, tileTransform))
+    if (tile.content && !isExternalTileset && !collectedDescendant) {
+      const bounds = getTileBounds(tile, tileTransform)
+      if (bounds) {
+        coverage.push(translateBounds(bounds, deltaToBase))
+        return true
+      }
+    }
+
+    return collectedDescendant
   }
 
   if (tileset.root) {
@@ -1148,30 +1482,37 @@ function pruneTilesetFile(
     inheritedTransform: number[] | undefined,
     keepTile: boolean,
     skipOwnTransform = false,
-  ): boolean => {
+  ): { keep: boolean; rects: OsgbBounds[] } => {
     const tileTransform = skipOwnTransform
       ? inheritedTransform
       : getCombinedTransform(inheritedTransform, tile)
     const bounds = getTileBounds(tile, tileTransform)
     const uri = getTileContentUri(tile)
     const isExternalTileset = !!uri && uri.toLowerCase().endsWith('tileset.json')
+    const keptRects: OsgbBounds[] = []
 
     if (isExternalTileset && uri) {
       const externalPath = path.resolve(tilesetDir, uri)
       if (fs.existsSync(externalPath)) {
         const childResult = pruneTilesetFile(externalPath, coverage, options, tileTransform)
         removed += childResult.removed
-        if (childResult.empty) return false
+        if (childResult.empty) return { keep: false, rects: [] }
+        if (bounds) keptRects.push(bounds)
       }
     }
 
     if (tile.children) {
-      tile.children = tile.children.filter((child) => pruneTile(child, tileTransform, false))
+      tile.children = tile.children.filter((child) => {
+        const result = pruneTile(child, tileTransform, false)
+        if (result.keep) keptRects.push(...result.rects)
+        return result.keep
+      })
       if (tile.children.length === 0) delete tile.children
     }
 
+    const hasChildren = !!(tile.children && tile.children.length > 0)
     const removeTile = bounds && (
-      isExternalTileset ? coverageContains(bounds, coverage) : shouldRemoveBaseTile(bounds, coverage, options)
+      isExternalTileset ? coverageContains(bounds, coverage) : shouldRemoveBaseTile(bounds, coverage, options, hasChildren, keptRects)
     )
 
     if (bounds && removeTile) {
@@ -1180,14 +1521,23 @@ function pruneTilesetFile(
           delete tile.content
           removed++
         }
-        return true
+        return { keep: true, rects: keptRects }
       }
 
       removed++
-      return false
+      return { keep: false, rects: [] }
     }
 
-    return true
+    if (bounds) {
+      keptRects.unshift(bounds)
+      // Boundary tile kept as a LOD placeholder: children (and the grafted
+      // update data) replace it once loaded, so the stale low-detail content
+      // does not visually overlap the updated area.
+      if (hasChildren && coverageIntersects(bounds, coverage) && !isExternalTileset) {
+        tile.refine = 'REPLACE'
+      }
+    }
+    return { keep: true, rects: keptRects }
   }
 
   if (tileset.root) {
@@ -1357,6 +1707,150 @@ function prepareMergedOutputDirectory(outputDir: string): void {
   }
 }
 
+// ??? Height alignment (stitch update surface onto base surface) ??????
+
+interface LeafZPoint {
+  x: number
+  y: number
+  z: number
+}
+
+function medianNumber(values: number[]): number | null {
+  if (values.length === 0) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  return sorted[Math.floor(sorted.length / 2)]
+}
+
+function collectLeafZPoints(
+  tilesetPath: string,
+  delta: CoordinateDelta,
+  out: LeafZPoint[],
+  parentTransform?: number[],
+  skipRootTransform = false,
+): boolean {
+  const tileset = readJsonFile<TilesetJson>(tilesetPath)
+  const tilesetDir = path.dirname(tilesetPath)
+  const walk = (
+    tile: TileJson,
+    inheritedTransform: number[] | undefined,
+    skipOwn = false,
+  ): boolean => {
+    const tileTransform = skipOwn
+      ? inheritedTransform
+      : getCombinedTransform(inheritedTransform, tile)
+    const uri = getTileContentUri(tile)
+    const isExternalTileset = !!uri && uri.toLowerCase().endsWith('tileset.json')
+    let hasDescendant = false
+
+    if (isExternalTileset && uri) {
+      const externalPath = path.resolve(tilesetDir, uri)
+      if (fs.existsSync(externalPath)) {
+        hasDescendant = collectLeafZPoints(externalPath, delta, out, tileTransform) || hasDescendant
+      }
+    }
+    if (tile.children) {
+      for (const child of tile.children) {
+        hasDescendant = walk(child, tileTransform) || hasDescendant
+      }
+    }
+    if (tile.content && !isExternalTileset && !hasDescendant) {
+      const bounds = getTileBounds(tile, tileTransform)
+      if (bounds) {
+        out.push({
+          x: (bounds.minX + bounds.maxX) / 2,
+          y: (bounds.minY + bounds.maxY) / 2,
+          z: (bounds.minZ + bounds.maxZ) / 2 + delta.z,
+        })
+      }
+      return true
+    }
+    return hasDescendant
+  }
+  if (tileset.root) return walk(tileset.root, parentTransform, skipRootTransform)
+  return false
+}
+
+function collectBaseZPointsNearCoverage(
+  tilesetPath: string,
+  coverage: OsgbBounds[],
+  out: LeafZPoint[],
+  margin = 250,
+  parentTransform?: number[],
+  skipRootTransform = false,
+): void {
+  const tileset = readJsonFile<TilesetJson>(tilesetPath)
+  const tilesetDir = path.dirname(tilesetPath)
+  const walk = (tile: TileJson, inheritedTransform: number[] | undefined, skipOwn = false): void => {
+    const tileTransform = skipOwn
+      ? inheritedTransform
+      : getCombinedTransform(inheritedTransform, tile)
+    const uri = getTileContentUri(tile)
+    const isExternalTileset = !!uri && uri.toLowerCase().endsWith('tileset.json')
+
+    if (isExternalTileset && uri) {
+      const externalPath = path.resolve(tilesetDir, uri)
+      if (fs.existsSync(externalPath)) {
+        collectBaseZPointsNearCoverage(externalPath, coverage, out, margin, tileTransform)
+      }
+    }
+    if (tile.children) {
+      for (const child of tile.children) walk(child, tileTransform)
+    }
+    if (tile.content && !isExternalTileset) {
+      const bounds = getTileBounds(tile, tileTransform)
+      if (!bounds) return
+      const near = coverage.some((c) => (
+        bounds.maxX >= c.minX - margin &&
+        bounds.minX <= c.maxX + margin &&
+        bounds.maxY >= c.minY - margin &&
+        bounds.minY <= c.maxY + margin
+      ))
+      if (near) {
+        out.push({
+          x: (bounds.minX + bounds.maxX) / 2,
+          y: (bounds.minY + bounds.maxY) / 2,
+          z: (bounds.minZ + bounds.maxZ) / 2,
+        })
+      }
+    }
+  }
+  if (tileset.root) walk(tileset.root, parentTransform, skipRootTransform)
+}
+
+function computeHeightCorrection(
+  baseTilesetPath: string,
+  updateOutputDirs: Array<{ outputDir: string; deltaToBase: CoordinateDelta }>,
+  coverage: OsgbBounds[],
+): number {
+  // Update leaf ground points (in base-local coordinates after delta).
+  const updatePoints: LeafZPoint[] = []
+  for (const update of updateOutputDirs) {
+    collectLeafZPoints(path.join(update.outputDir, 'tileset.json'), update.deltaToBase, updatePoints, undefined, true)
+  }
+  // Base leaf ground points adjacent to the update coverage.
+  const basePoints: LeafZPoint[] = []
+  collectBaseZPointsNearCoverage(baseTilesetPath, coverage, basePoints, 250, undefined, true)
+  if (updatePoints.length === 0 || basePoints.length === 0) return 0
+
+  // Pair each update leaf with its nearest base leaf and measure the seam gap.
+  const diffs: number[] = []
+  for (const u of updatePoints) {
+    let best: LeafZPoint | null = null
+    let bestDist = Infinity
+    for (const b of basePoints) {
+      const d = Math.hypot(u.x - b.x, u.y - b.y)
+      if (d < bestDist) { bestDist = d; best = b }
+    }
+    if (best && bestDist <= 250) diffs.push(u.z - best.z)
+  }
+  const medianDiff = medianNumber(diffs)
+  if (medianDiff === null) return 0
+
+  // Shift the update surface down by the median seam gap so it stitches onto
+  // the base surface instead of floating above (or sinking below) it.
+  return -medianDiff
+}
+
 function mergeConvertedTilesets(
   baseOutputDir: string,
   updateOutputDirs: Array<{ outputDir: string; deltaToBase: CoordinateDelta }>,
@@ -1376,6 +1870,12 @@ function mergeConvertedTilesets(
   const coverage = normalizeCoverageBounds(updateOutputDirs.flatMap((update) => (
     collectCoverageFromTileset(path.join(update.outputDir, 'tileset.json'), update.deltaToBase)
   )))
+  // Auto-stitch the update surface onto the base surface (fix floating updates).
+  const heightCorrection = computeHeightCorrection(
+    path.join(baseOutputDir, 'tileset.json'),
+    updateOutputDirs,
+    coverage,
+  )
   const outputTilesetPath = path.join(outputDir, 'tileset.json')
   const pruneResult = pruneTilesetFile(outputTilesetPath, coverage, edgeOptions, undefined, true)
   const mergedTileset = readJsonFile<TilesetJson>(outputTilesetPath)
@@ -1401,8 +1901,14 @@ function mergeConvertedTilesets(
 
     const graftedTile = cloneTile(updateRoot)
     // The update root has its own top-level georeference. It must be replaced
-    // by the base-local delta when grafted under the base root.
-    graftedTile.transform = makeTranslationTransform(update.deltaToBase)
+    // by the base-local delta when grafted under the base root. The z delta is
+    // corrected so the update surface stitches onto the base surface instead of
+    // floating above or below it.
+    const graftDelta: CoordinateDelta = {
+      ...update.deltaToBase,
+      z: update.deltaToBase.z + heightCorrection,
+    }
+    graftedTile.transform = makeTranslationTransform(graftDelta)
     normalizeTileBoundingVolume(graftedTile)
     rewriteTileContentUris(graftedTile, updateDataName)
     rootChildren.push(graftedTile)
@@ -1433,7 +1939,12 @@ export interface HeadlessMergeUpdateConfig {
   offset?: number
   max_lvl?: number
   edge_precision?: number
+  output_transparency?: boolean
+  output_opacity?: number
   pbr?: boolean
+  aggregate?: boolean
+  aggregateTargetMB?: number
+  aggregateMaxMB?: number
 }
 
 export interface HeadlessMergeUpdateParams {
@@ -1755,6 +2266,41 @@ function runHeadless3dTileConversion(
   })
 }
 
+function applyOutputTransparencyWithLog(
+  outputDir: string,
+  config: HeadlessMergeUpdateConfig,
+  params: HeadlessMergeUpdateParams,
+): void {
+  const result = applyOutputTransparency(outputDir, config)
+  if (!result.enabled) return
+
+  emitStdout(
+    params,
+    `正在写入输出透明通道 (alpha=${result.opacity}%，${result.opacity < 100 ? 'BLEND' : '保持不透明、避免瓦片缝隙'}），已处理 ${result.processed} 个 b3dm/glb，跳过 ${result.skipped} 个\n`,
+  )
+}
+
+function applyAggregationWithLog(
+  outputDir: string,
+  config: HeadlessMergeUpdateConfig,
+  params: HeadlessMergeUpdateParams,
+): void {
+  if (config.aggregate !== true) return
+  const targetMB = config.aggregateTargetMB && config.aggregateTargetMB > 0 ? config.aggregateTargetMB : 30
+  const maxMB = config.aggregateMaxMB && config.aggregateMaxMB > 0 ? config.aggregateMaxMB : 100
+  emitStdout(params, '?????????????? tile??? LOD?...\n')
+  try {
+    const stats = aggregateTiles(outputDir, { targetMB, maxMB, clean: true })
+    emitStdout(
+      params,
+      `??????: ${stats.beforeTiles} -> ${stats.afterTiles} ?????? ${stats.reduction.toFixed(1)} ????? ${stats.mergeGroups} ?????? ${stats.cleanedFiles} ???\n`,
+    )
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    emitStderr(params, `??????: ${message}\n`)
+  }
+}
+
 export async function runHeadlessMergeUpdate(
   params: HeadlessMergeUpdateParams,
 ): Promise<HeadlessMergeUpdateResult> {
@@ -1845,6 +2391,8 @@ export async function runHeadlessMergeUpdate(
           params,
           `3D Tiles 合并完成，边缘精细度 ${mergeResult.edgePrecision}%，覆盖细瓦片 ${mergeResult.coverageTileCount} 个，裁剪大范围瓦片节点 ${mergeResult.removedBaseTiles} 个，接入小范围瓦片节点 ${mergeResult.addedUpdateTiles} 个\n`,
         )
+        applyOutputTransparencyWithLog(outputDir, config, params)
+        applyAggregationWithLog(outputDir, config, params)
         emitStatus(params, 'success')
         return { success: true, outputDir }
       } catch (err: unknown) {
@@ -1861,6 +2409,8 @@ export async function runHeadlessMergeUpdate(
     try {
       emitStdout(params, `转换参数: ${JSON.stringify(configObj)}\n`)
       await runHeadless3dTileConversion(params, exePath, exeDir, gdalDataPath, inputDir, outputDir, configObj)
+      applyOutputTransparencyWithLog(outputDir, config, params)
+      applyAggregationWithLog(outputDir, config, params)
       emitStatus(params, 'success')
       return { success: true, outputDir }
     } catch (err: unknown) {

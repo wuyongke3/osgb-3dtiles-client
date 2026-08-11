@@ -10,6 +10,8 @@ export interface MergeUpdateToolApi {
       offset?: number
       max_lvl?: number
       edge_precision?: number
+      output_transparency?: boolean
+      output_opacity?: number
       pbr?: boolean
     }
     updateDirs?: string[]
@@ -32,6 +34,10 @@ export interface MergeUpdateParams {
   max_lvl?: number
   edgePrecision?: number
   edge_precision?: number
+  outputTransparency?: boolean
+  output_transparency?: boolean
+  outputOpacity?: number
+  output_opacity?: number
   pbr?: boolean
   onStdout?: (text: string) => void
   onStderr?: (text: string) => void
@@ -79,6 +85,8 @@ export function buildMergeUpdateConversionParams(params: MergeUpdateParams) {
   const outputDir = params.outputDir?.trim() || undefined
   const maxLevel = params.maxLvl ?? params.max_lvl
   const edgePrecision = params.edgePrecision ?? params.edge_precision
+  const outputTransparency = params.outputTransparency ?? params.output_transparency
+  const outputOpacity = params.outputOpacity ?? params.output_opacity
 
   return {
     inputDir: params.inputDir.trim(),
@@ -89,6 +97,8 @@ export function buildMergeUpdateConversionParams(params: MergeUpdateParams) {
       offset: params.offset,
       max_lvl: maxLevel,
       edge_precision: edgePrecision,
+      output_transparency: outputTransparency,
+      output_opacity: outputOpacity,
       pbr: params.pbr,
     },
     updateDirs: normalizeUpdateDirs(params.updateDirs),

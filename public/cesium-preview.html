@@ -11,7 +11,7 @@
     html, body, #cesiumContainer {
       width: 100%; height: 100%;
       overflow: hidden;
-      background: #000;
+      background: #05070a;
     }
     .cesium-viewer-bottom { display: none !important; }
 
@@ -386,6 +386,7 @@
     var visibleTilesThisFrame = 0
     var cesiumLoadTimer = null
     var activeTilesets = []
+    var loadedTileModels = []
     var activeCameraController = null
     var defaultZoomFactor = 5.0
     var visualState = {
@@ -422,39 +423,55 @@
       wheelSensitivityNumber.value = String(visualState.wheelSensitivityPercent)
     }
 
-    function createVisualShader() {
-      var opacity = visualState.opacityPercent / 100
+    // Opacity: real transparency through the official Model.color API
+    // (material.alpha *= model_color.a). Colors stay untouched with the default
+    // HIGHLIGHT blend mode; alpha in (0,1) switches the model to translucent
+    // rendering so you can see through the tiles. No shader is used.
+    function applyTileModelAlpha(model, alpha) {
+      if (!model) return
+      try {
+        var color = model.color
+        if (!color) {
+          color = new Cesium.Color(1, 1, 1, alpha)
+        } else {
+          color.alpha = alpha
+        }
+        model.color = color
+      } catch (e) {}
+    }
+
+    // Brightness: plain CSS filter on the canvas (no shader), only set while
+    // the user adjusts it. At 100% the filter is cleared.
+    function applyBrightness() {
+      var canvas = getPreviewCanvas()
+      if (!canvas) return
       var brightness = visualState.brightnessPercent / 100
-      return new Cesium.CustomShader({
-        mode: Cesium.CustomShaderMode.MODIFY_MATERIAL,
-        translucencyMode: Cesium.CustomShaderTranslucencyMode.TRANSLUCENT,
-        uniforms: {
-          u_opacity: { type: Cesium.UniformType.FLOAT, value: opacity },
-          u_brightness: { type: Cesium.UniformType.FLOAT, value: brightness },
-        },
-        fragmentShaderText: [
-          'void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material)',
-          '{',
-          '  material.diffuse = clamp(material.diffuse * u_brightness, vec3(0.0), vec3(1.0));',
-          '  material.alpha *= u_opacity;',
-          '}',
-        ].join('\n'),
-      })
+      if (brightness > 0.999 && brightness < 1.001) {
+        canvas.style.filter = ''
+      } else {
+        canvas.style.filter = 'brightness(' + brightness.toFixed(3) + ')'
+      }
+    }
+
+    function getPreviewCanvas() {
+      try {
+        var container = document.getElementById('cesiumContainer')
+        if (container) {
+          var canvas = container.querySelector('canvas')
+          if (canvas) return canvas
+        }
+      } catch (e) {}
+      return null
     }
 
     function applyVisualState() {
-      for (var i = 0; i < activeTilesets.length; i += 1) {
-        var target = activeTilesets[i]
-        if (!target) continue
-        if (target.__tilesVisualShader && target.customShader === target.__tilesVisualShader) {
-          target.customShader.setUniform('u_opacity', visualState.opacityPercent / 100)
-          target.customShader.setUniform('u_brightness', visualState.brightnessPercent / 100)
-        } else {
-          target.customShader = createVisualShader()
-          target.__tilesVisualShader = target.customShader
-          target.style = undefined
-        }
+      var alpha = visualState.opacityPercent / 100
+      for (var i = 0; i < loadedTileModels.length; i += 1) {
+        var model = loadedTileModels[i]
+        if (!model) continue
+        applyTileModelAlpha(model, alpha)
       }
+      applyBrightness()
       syncVisualLabels()
     }
 
@@ -756,7 +773,7 @@
           .then(function (tileset) {
             viewer.scene.primitives.add(tileset)
             activeTilesets = [tileset]
-            applyVisualState()
+            syncVisualLabels()
             setPhase('加载瓦片', 'tileset.json 已载入，正在请求首屏瓦片...')
 
             tileset.loadProgress.addEventListener(function (numberOfPendingRequests, numberOfTilesProcessing) {
@@ -770,10 +787,30 @@
               }
             })
 
-            tileset.tileLoad.addEventListener(function () {
+            tileset.tileLoad.addEventListener(function (tile) {
               tileStats.loadedTiles += 1
               markActivity()
               requestStatusRender()
+              try {
+                var model = tile && tile.content && tile.content._model
+                if (model && loadedTileModels.indexOf(model) === -1) {
+                  loadedTileModels.push(model)
+                  if (visualState.opacityPercent !== 100) {
+                    applyTileModelAlpha(model, visualState.opacityPercent / 100)
+                  }
+                }
+              } catch (e) {}
+            })
+
+            tileset.tileUnload.addEventListener(function (tile) {
+              try {
+                var model = tile && tile.content && tile.content._model
+                if (!model) return
+                var index = loadedTileModels.indexOf(model)
+                if (index !== -1) {
+                  loadedTileModels.splice(index, 1)
+                }
+              } catch (e) {}
             })
 
             tileset.tileVisible.addEventListener(function () {

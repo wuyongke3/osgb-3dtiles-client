@@ -25,7 +25,12 @@ interface ConversionConfig {
   offset?: number
   max_lvl?: number
   edge_precision?: number
+  output_transparency?: boolean
+  output_opacity?: number
   pbr?: boolean
+  aggregate?: boolean
+  aggregateTargetMB?: number
+  aggregateMaxMB?: number
 }
 
 interface ConversionParams {

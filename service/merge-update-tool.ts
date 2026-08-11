@@ -29,8 +29,14 @@ function printUsage(): void {
     '  --level                          最大层级；不传时自动扫描 OSGB，扫描不到默认 20',
     '  --outputDir, --output-dir         输出目录',
     '  --density                        边缘清晰度/精细度，建议 50-98，默认 85',
+'  --transparent                     输出后为每个材质添加 alpha 属性 (默认 1 不透明，避免瓦片缝隙；透明由预览控制)',
+    '  --no-transparent                  不写入透明通道（默认）',
+    '  --opacity, --output-opacity       兼容旧参数：输出透明度百分比，1-100；默认 100 不处理',
     '  --x --y --offset                 手动中心坐标和高度偏移；通常 metadata 可自动推断',
     '  --pbr                            启用 PBR',
+    '  --aggregate                       转换完成后自动瓦片聚合（合并碎片 tile）',
+    '  --aggregate-target-mb              聚合单 tile 目标大小，默认 30',
+    '  --aggregate-max-mb                 聚合单 tile 上限，默认 100',
     '',
     'Result JSON is written to stdout. Conversion logs are written to stderr.',
     '',
@@ -104,6 +110,22 @@ function parseArgs(argv: string[]): CliOptions {
       index++
       continue
     }
+    if (arg === '--opacity' || arg === '--output-opacity' || arg === '--output_opacity') {
+      options.directParams.output_opacity = Number(readValue(index, arg))
+      options.hasDirectParams = true
+      index++
+      continue
+    }
+    if (arg === '--transparent' || arg === '--output-transparency' || arg === '--output_transparency') {
+      options.directParams.output_transparency = true
+      options.hasDirectParams = true
+      continue
+    }
+    if (arg === '--no-transparent' || arg === '--no-output-transparency' || arg === '--no_output_transparency') {
+      options.directParams.output_transparency = false
+      options.hasDirectParams = true
+      continue
+    }
     if (arg === '--x' || arg === '--y' || arg === '--offset') {
       options.directParams[arg.slice(2)] = Number(readValue(index, arg))
       options.hasDirectParams = true
@@ -113,6 +135,23 @@ function parseArgs(argv: string[]): CliOptions {
     if (arg === '--pbr') {
       options.directParams.pbr = true
       options.hasDirectParams = true
+      continue
+    }
+    if (arg === '--aggregate') {
+      options.directParams.aggregate = true
+      options.hasDirectParams = true
+      continue
+    }
+    if (arg === '--aggregate-target-mb' || arg === '--aggregateTargetMB') {
+      options.directParams.aggregateTargetMB = Number(readValue(index, arg))
+      options.hasDirectParams = true
+      index++
+      continue
+    }
+    if (arg === '--aggregate-max-mb' || arg === '--aggregateMaxMB') {
+      options.directParams.aggregateMaxMB = Number(readValue(index, arg))
+      options.hasDirectParams = true
+      index++
       continue
     }
     if (arg === '--toolDir' || arg === '--tool-dir') {
@@ -174,7 +213,12 @@ function normalizeParams(raw: unknown): HeadlessMergeUpdateParams {
       offset: (config.offset ?? source.offset) as number | undefined,
       max_lvl: (config.max_lvl ?? source.max_lvl ?? source.maxLvl) as number | undefined,
       edge_precision: (config.edge_precision ?? source.edge_precision ?? source.edgePrecision) as number | undefined,
+      output_transparency: (config.output_transparency ?? source.output_transparency ?? source.outputTransparency) as boolean | undefined,
+      output_opacity: (config.output_opacity ?? source.output_opacity ?? source.outputOpacity) as number | undefined,
       pbr: (config.pbr ?? source.pbr) as boolean | undefined,
+      aggregate: (config.aggregate ?? source.aggregate) as boolean | undefined,
+      aggregateTargetMB: (config.aggregateTargetMB ?? source.aggregateTargetMB) as number | undefined,
+      aggregateMaxMB: (config.aggregateMaxMB ?? source.aggregateMaxMB) as number | undefined,
     },
   }
 }

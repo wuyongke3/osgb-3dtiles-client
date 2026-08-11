@@ -39,7 +39,11 @@ interface Config {
   offset: number;
   max_lvl: number;
   edge_precision: number;
+  output_transparency: boolean;
   pbr: boolean;
+  aggregate: boolean;
+  aggregateTargetMB: number;
+  aggregateMaxMB: number;
 }
 
 const iconPaths: Record<IconName, string[]> = {
@@ -129,7 +133,11 @@ const config = reactive<Config>({
   offset: 0,
   max_lvl: 20,
   edge_precision: 85,
+  output_transparency: false,
   pbr: false,
+  aggregate: false,
+  aggregateTargetMB: 30,
+  aggregateMaxMB: 100,
 });
 
 const metadataMessage = ref("");
@@ -290,7 +298,7 @@ async function startConversion() {
 
   appendLog(`启动转换: ${inputDir.value} -> ${outputDir.value || "auto"}`, "info");
   appendLog(
-    `配置: x=${config.x || "auto"}, y=${config.y || "auto"}, offset=${config.offset}, max_lvl=${config.max_lvl}, edge_precision=${config.edge_precision}, pbr=${config.pbr}`,
+    `配置: x=${config.x || "auto"}, y=${config.y || "auto"}, offset=${config.offset}, max_lvl=${config.max_lvl}, edge_precision=${config.edge_precision}, output_transparency=${config.output_transparency}, pbr=${config.pbr}, aggregate=${config.aggregate}`,
     "info",
   );
   if (updateDirs.value.length > 0) {
@@ -308,7 +316,11 @@ async function startConversion() {
       offset: config.offset,
       max_lvl: config.max_lvl,
       edge_precision: config.edge_precision,
+      output_transparency: config.output_transparency,
       pbr: config.pbr,
+      aggregate: config.aggregate,
+      aggregateTargetMB: config.aggregateTargetMB,
+      aggregateMaxMB: config.aggregateMaxMB,
       onStdout: (text) => appendLog(text, "out"),
       onStderr: (text) => appendLog(text, "err"),
       onStatus: (nextStatus) => {
@@ -600,9 +612,23 @@ onMounted(async () => {
             </div>
           </div>
 
+          <div class="toggle-wrapper">
+            <input
+              id="cfg-output-transparency"
+              v-model="config.output_transparency"
+              type="checkbox"
+            />
+            <label for="cfg-output-transparency">输出后写入透明通道</label>
+          </div>
+
           <div class="toggle-wrapper pbr-toggle">
             <input id="cfg-pbr" v-model="config.pbr" type="checkbox" />
             <label for="cfg-pbr">启用 PBR 纹理</label>
+          </div>
+
+          <div class="toggle-wrapper pbr-toggle">
+            <input id="cfg-aggregate" v-model="config.aggregate" type="checkbox" />
+            <label for="cfg-aggregate">转换后瓦片聚合（合并碎片 tile，减少数量）</label>
           </div>
         </section>
 
