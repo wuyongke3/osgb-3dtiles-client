@@ -1,4 +1,4 @@
-import * as Cesium from "cesium";
+import * as Cesium from "mars3d-cesium";
 
 export interface TilesVisualState {
   opacityPercent: number;

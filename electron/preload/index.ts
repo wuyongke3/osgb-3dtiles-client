@@ -117,6 +117,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startPreview: (params?: { outputDir?: string; centerX?: number; centerY?: number; offset?: number }): Promise<{ success: boolean; error?: string; port?: number; url?: string }> =>
     ipcRenderer.invoke('start-preview', params),
 
+
+  // 前台页内预览：只启动静态服务器，返回 tileset URL，不打开独立窗口
+  servePreview: (outputDir?: string): Promise<{ success: boolean; error?: string; port?: number; url?: string }> =>
+    ipcRenderer.invoke('preview-serve', { outputDir }),
+
   stopPreview: (): Promise<boolean> =>
     ipcRenderer.invoke('stop-preview'),
 

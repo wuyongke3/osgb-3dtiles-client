@@ -1,13 +1,5 @@
 <script setup lang="ts">
-
-import {
-  computed,
-  h,
-  nextTick,
-  onMounted,
-  reactive,
-  ref,
-} from "vue";
+import { computed, h, nextTick, onMounted, reactive, ref } from "vue";
 import {
   cancelMergeUpdateConversion,
   checkMergeUpdateTool,
@@ -20,11 +12,13 @@ import PageModal from "../components/page-modal";
 import usePageStore, { registerLocalPageHandler } from "../stores/page/page";
 import usePageContent from "../hooks/usePageContent";
 import usePageModal from "../hooks/usePageModal";
-import { systemData as adminSystemData, systemToMap as adminToMap } from "../config/system-menu.js";
+import {
+  systemData as adminSystemData,
+  systemToMap as adminToMap,
+} from "../config/system-menu.js";
 import searchConfig from "../views/admin/batch/config/search.config";
 import contentConfig from "../views/admin/batch/config/content.config";
 import modalConfig from "../views/admin/batch/config/modal.config";
-
 
 type ConversionStatus = "idle" | "running" | "success" | "error" | "cancelled";
 type Theme = "dark" | "light";
@@ -309,7 +303,10 @@ async function startConversion() {
   statusMessage.value = "";
   logLines.value = [];
 
-  appendLog(`启动转换: ${inputDir.value} -> ${outputDir.value || "auto"}`, "info");
+  appendLog(
+    `启动转换: ${inputDir.value} -> ${outputDir.value || "auto"}`,
+    "info",
+  );
   appendLog(
     `配置: x=${config.x || "auto"}, y=${config.y || "auto"}, offset=${config.offset}, max_lvl=${config.max_lvl}, edge_precision=${config.edge_precision}, output_transparency=${config.output_transparency}, pbr=${config.pbr}, aggregate=${config.aggregate}`,
     "info",
@@ -360,7 +357,6 @@ async function startConversion() {
     statusMessage.value = err instanceof Error ? err.message : String(err);
     appendLog(`错误: ${statusMessage.value}`, "err");
   }
-
 }
 
 async function cancelConversion() {
@@ -423,21 +419,45 @@ onMounted(async () => {
   await loadBatches();
 });
 
-
-
 // 面包屑：批次管理 / 高级转换 / 记录管理
 const activeMenu = ref<"batch" | "convert" | "records">("batch");
+// 当前激活的菜单名称（来自 MyNavigate 的 active-menu-change）
+const currentMenuName = ref("批次管理");
 const currentUser = ref<{ username: string; role: string } | null>(
-  (() => { try { return JSON.parse(sessionStorage.getItem("bs-user") || "null"); } catch { return null; } })(),
+  (() => {
+    try {
+      return JSON.parse(sessionStorage.getItem("bs-user") || "null");
+    } catch {
+      return null;
+    }
+  })(),
 );
 // ===== 批次管理（日更批次表 + 日更转化表） =====
-interface BatchItem { id: number; name: string; description?: string; created_at?: string }
+interface BatchItem {
+  id: number;
+  name: string;
+  description?: string;
+  created_at?: string;
+}
 interface RecordItem {
-  id: number; batch_id?: number; name?: string; input_dir?: string; output_dir?: string;
-  status?: string; tile_count?: number; duration_sec?: number;
-  source_name?: string; source_path?: string; update_name?: string; update_path?: string;
-  merged_name?: string; merged_path?: string; transparent?: number; edge_precision?: number; aggregate?: number;
-  created_at?: string
+  id: number;
+  batch_id?: number;
+  name?: string;
+  input_dir?: string;
+  output_dir?: string;
+  status?: string;
+  tile_count?: number;
+  duration_sec?: number;
+  source_name?: string;
+  source_path?: string;
+  update_name?: string;
+  update_path?: string;
+  merged_name?: string;
+  merged_path?: string;
+  transparent?: number;
+  edge_precision?: number;
+  aggregate?: number;
+  created_at?: string;
 }
 
 const batches = ref<BatchItem[]>([]);
@@ -468,16 +488,34 @@ const convertDialogVisible = ref(false);
 const convertingRecord = ref<RecordItem | null>(null);
 const convertStatus = ref<ConversionStatus>("idle");
 const convertLogs = ref<string[]>([]);
+// 转换任务弹窗标题：带当前状态，关闭后再次打开可直观看到任务进度
+const convertTitle = computed(() => {
+  const map: Record<ConversionStatus, string> = {
+    idle: "（待转换）",
+    running: "（转换中）",
+    success: "（已完成）",
+    error: "（失败）",
+    cancelled: "（已取消）",
+  };
+  return "转换任务" + (map[convertStatus.value] || "");
+});
 const convertLogContainer = ref<HTMLElement | null>(null);
 
-function dirName(dir: string) { return dir.split(/[\\/]/).filter(Boolean).pop() || dir; }
+function dirName(dir: string) {
+  return dir.split(/[\\/]/).filter(Boolean).pop() || dir;
+}
 function recordStatusText(st?: string) {
   switch (st) {
-    case "running": return "转换中";
-    case "success": return "成功";
-    case "error": return "失败";
-    case "cancelled": return "已取消";
-    default: return "待转换";
+    case "running":
+      return "转换中";
+    case "success":
+      return "成功";
+    case "error":
+      return "失败";
+    case "cancelled":
+      return "已取消";
+    default:
+      return "待转换";
   }
 }
 
@@ -503,10 +541,16 @@ async function loadBatchRecords() {
   await nextTick();
   contentRef.value?.featchPageListData();
 }
-async function openAddBatch() { batchName.value = ""; batchDialogVisible.value = true; }
+async function openAddBatch() {
+  batchName.value = "";
+  batchDialogVisible.value = true;
+}
 async function saveBatch() {
   const name = batchName.value.trim();
-  if (!name) { ElMessage.warning("请输入批次名称"); return; }
+  if (!name) {
+    ElMessage.warning("请输入批次名称");
+    return;
+  }
   batchSaving.value = true;
   try {
     const res = await window.electronAPI.batches.add({ name });
@@ -514,11 +558,16 @@ async function saveBatch() {
       ElMessage.success("批次创建成功");
       batchDialogVisible.value = false;
       await loadBatches();
-      if (res.id) { currentBatchId.value = res.id; await loadBatchRecords(); }
+      if (res.id) {
+        currentBatchId.value = res.id;
+        await loadBatchRecords();
+      }
     } else {
       ElMessage.error(res.error || "创建失败");
     }
-  } finally { batchSaving.value = false; }
+  } finally {
+    batchSaving.value = false;
+  }
 }
 async function selectBatch(id: number) {
   currentBatchId.value = id;
@@ -526,8 +575,16 @@ async function selectBatch(id: number) {
 }
 async function deleteBatch(batch: BatchItem) {
   try {
-    await ElMessageBox.confirm("删除批次「" + batch.name + "」将同时删除该批次下所有转换记录，确定删除吗？", "删除批次", { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" });
-  } catch { return; }
+    await ElMessageBox.confirm(
+      "删除批次「" +
+        batch.name +
+        "」将同时删除该批次下所有转换记录，确定删除吗？",
+      "删除批次",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
   await window.electronAPI.batches.delete(batch.id);
   if (currentBatchId.value === batch.id) currentBatchId.value = null;
   await loadBatches();
@@ -535,14 +592,17 @@ async function deleteBatch(batch: BatchItem) {
 
 // ---- page-search / page-content / page-modal 联动（参照 yitai hooks） ----
 const pageStore = usePageStore();
-const { searchRef, contentRef, handleQueryClick, handleResetClick } = usePageContent();
+const { searchRef, contentRef, handleQueryClick, handleResetClick } =
+  usePageContent();
 const { modalRef, handleClick } = usePageModal();
 
 // 本地数据源注册：url 约定 local:batch-records / local:batches
 registerLocalPageHandler("batch-records", {
   list: async () => {
     if (!currentBatchId.value) return [];
-    return (await window.electronAPI.records.listByBatch(currentBatchId.value)) as RecordItem[];
+    return (await window.electronAPI.records.listByBatch(
+      currentBatchId.value,
+    )) as RecordItem[];
   },
   add: async (data) => {
     const res = await window.electronAPI.records.add({
@@ -568,7 +628,8 @@ registerLocalPageHandler("batch-records", {
 });
 registerLocalPageHandler("batches", {
   list: async () => (await window.electronAPI.batches.list()) as BatchItem[],
-  add: async (data) => window.electronAPI.batches.add({ name: String(data.name || "") }),
+  add: async (data) =>
+    window.electronAPI.batches.add({ name: String(data.name || "") }),
   update: async () => ({ success: false, error: "不支持编辑批次" }),
   remove: async () => ({ success: false, error: "不支持批量删除批次" }),
 });
@@ -577,7 +638,8 @@ registerLocalPageHandler("batches", {
 function handleTitleEvent(event: string) {
   if (event === "handleNewBatchClick") openAddBatch();
   else if (event === "handleUploadClick") openUploadRecord();
-  else if (event === "handleRefreshClick") contentRef.value?.featchPageListData();
+  else if (event === "handleRefreshClick")
+    contentRef.value?.featchPageListData();
 }
 // page-content 行内按钮事件
 function handleRowEvent(event: string, row: RecordItem) {
@@ -586,47 +648,90 @@ function handleRowEvent(event: string, row: RecordItem) {
 }
 
 async function openUploadRecord() {
-  if (!currentBatchId.value) { openAddBatch(); return; }
+  if (!currentBatchId.value) {
+    openAddBatch();
+    return;
+  }
   modalRef.value?.setModal();
 }
 async function handleSelectSourceDir(formData: any) {
   const dir = await window.electronAPI.selectOsgbDir();
-  if (dir) { formData.source_path = dir; formData.source_name = dirName(dir); }
+  if (dir) {
+    formData.source_path = dir;
+    formData.source_name = dirName(dir);
+  }
 }
 async function handleSelectUpdateDir(formData: any) {
   const dir = await window.electronAPI.selectOsgbDir();
-  if (dir) { formData.update_path = dir; formData.update_name = dirName(dir); }
+  if (dir) {
+    formData.update_path = dir;
+    formData.update_name = dirName(dir);
+  }
 }
 async function removeBatchRecord(record: RecordItem) {
   try {
-    await ElMessageBox.confirm("确定删除该转换记录吗？", "删除记录", { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" });
-  } catch { return; }
+    await ElMessageBox.confirm("确定删除该转换记录吗？", "删除记录", {
+      type: "warning",
+      confirmButtonText: "删除",
+      cancelButtonText: "取消",
+    });
+  } catch {
+    return;
+  }
   await window.electronAPI.records.delete(record.id);
   await loadBatchRecords();
 }
 function openConvertDialog(record: RecordItem) {
+  // 已有转换任务进行中：关闭弹窗不停止转换，再次点击只是重新打开任务窗口查看进度
+  if (convertStatus.value === "running" && convertingRecord.value) {
+    if (convertingRecord.value.id !== record.id) {
+      ElMessage.info("已有转换任务进行中，正在查看该任务");
+    }
+    convertDialogVisible.value = true;
+    return;
+  }
   convertingRecord.value = record;
   convertStatus.value = "idle";
   convertLogs.value = [];
   convertDialogVisible.value = true;
 }
 function appendConvertLog(text: string, type: LogType = "out") {
-  const prefix = type === "err" ? "[stderr] " : type === "info" ? "[info] " : "";
+  const prefix =
+    type === "err" ? "[stderr] " : type === "info" ? "[info] " : "";
   const lines = (prefix + text).split("\n").filter((l) => l.trim());
   convertLogs.value.push(...lines);
-  if (convertLogs.value.length > 2000) convertLogs.value = convertLogs.value.slice(-2000);
+  if (convertLogs.value.length > 2000)
+    convertLogs.value = convertLogs.value.slice(-2000);
   nextTick(() => {
-    if (convertLogContainer.value) convertLogContainer.value.scrollTop = convertLogContainer.value.scrollHeight;
+    if (convertLogContainer.value)
+      convertLogContainer.value.scrollTop =
+        convertLogContainer.value.scrollHeight;
   });
 }
 async function startRecordConversion() {
   const record = convertingRecord.value;
-  if (!record || !record.source_path) { ElMessage.warning("记录缺少原数据路径"); return; }
+  if (!record || !record.source_path) {
+    ElMessage.warning("记录缺少原数据路径");
+    return;
+  }
+  if (convertStatus.value === "running") {
+    ElMessage.warning("已有转换任务进行中，请先等待完成或取消后再转换");
+    return;
+  }
   convertStatus.value = "running";
   convertLogs.value = [];
   appendConvertLog("启动转换: " + record.source_path, "info");
-  if (record.update_path) appendConvertLog("更新数据: " + record.update_path, "info");
-  appendConvertLog("是否透明: " + (record.transparent === 1 ? "是" : "否") + ", 边缘精细度: " + (record.edge_precision ?? 85) + ", 瓦片聚合: " + (record.aggregate === 1 ? "是" : "否"), "info");
+  if (record.update_path)
+    appendConvertLog("更新数据: " + record.update_path, "info");
+  appendConvertLog(
+    "是否透明: " +
+      (record.transparent === 1 ? "是" : "否") +
+      ", 边缘精细度: " +
+      (record.edge_precision ?? 85) +
+      ", 瓦片聚合: " +
+      (record.aggregate === 1 ? "是" : "否"),
+    "info",
+  );
   try {
     const result = await runMergeUpdateConversion({
       inputDir: record.source_path,
@@ -640,7 +745,9 @@ async function startRecordConversion() {
       recordId: record.id,
       onStdout: (t) => appendConvertLog(t, "out"),
       onStderr: (t) => appendConvertLog(t, "err"),
-      onStatus: (st) => { convertStatus.value = st as ConversionStatus; },
+      onStatus: (st) => {
+        convertStatus.value = st as ConversionStatus;
+      },
     });
     if (result.success) {
       appendConvertLog("转换成功完成", "info");
@@ -652,7 +759,10 @@ async function startRecordConversion() {
     await loadBatchRecords();
   } catch (err: unknown) {
     convertStatus.value = "error";
-    appendConvertLog("错误: " + (err instanceof Error ? err.message : String(err)), "err");
+    appendConvertLog(
+      "错误: " + (err instanceof Error ? err.message : String(err)),
+      "err",
+    );
   }
 }
 async function cancelRecordConversion() {
@@ -683,26 +793,34 @@ function goFront() {
   window.location.hash = "#/front";
 }
 
+import MyNavigate from "../common/menu/index.js";
 
-import MyNavigate from '../common/menu/index.js'
-
-const searchKeyword = ref('')
+const searchKeyword = ref("");
 const filteredRecords = computed(() => {
-  const kw = searchKeyword.value.trim().toLowerCase()
-  if (!kw) return records.value
-  return records.value.filter((r) =>
-    String(r.name || '').toLowerCase().includes(kw) ||
-    String(r.input_dir || '').toLowerCase().includes(kw) ||
-    String(r.output_dir || '').toLowerCase().includes(kw) ||
-    String(r.status || '').toLowerCase().includes(kw),
-  )
-})
+  const kw = searchKeyword.value.trim().toLowerCase();
+  if (!kw) return records.value;
+  return records.value.filter(
+    (r) =>
+      String(r.name || "")
+        .toLowerCase()
+        .includes(kw) ||
+      String(r.input_dir || "")
+        .toLowerCase()
+        .includes(kw) ||
+      String(r.output_dir || "")
+        .toLowerCase()
+        .includes(kw) ||
+      String(r.status || "")
+        .toLowerCase()
+        .includes(kw),
+  );
+});
 
 // ===== 后台侧栏：与前台共用同一套固定菜单（src/config/system-menu.js） =====
-function onAdminNavActive() {
-  // hash route switch is handled by App.vue
+function onAdminNavActive(activeMenu?: any) {
+  // 面包屑显示当前激活菜单名称（批次管理 / 矿山云平台）
+  currentMenuName.value = activeMenu?.name || "批次管理";
 }
-
 </script>
 
 <template>
@@ -729,23 +847,25 @@ function onAdminNavActive() {
           <div class="layout-header">
             <div class="content">
               <div class="breadcrumb">
-                <span class="bc-title" :class="{ active: activeMenu === 'batch' }" @click="activeMenu = 'batch'">批次管理</span>
-                <span class="bc-sep">/</span>
-                <span class="bc-title" :class="{ active: activeMenu === 'convert' }" @click="activeMenu = 'convert'">高级转换</span>
-                <span class="bc-sep">/</span>
-                <span class="bc-title" :class="{ active: activeMenu === 'records' }" @click="activeMenu = 'records'">记录管理</span>
+                <span class="bc-title active">{{ currentMenuName }}</span>
               </div>
               <div class="info">
                 <el-dropdown>
                   <span class="user-name">
                     <el-icon><User /></el-icon>
-                    <span class="uname">{{ currentUser?.username || 'admin' }}</span>
+                    <span class="uname">{{
+                      currentUser?.username || "admin"
+                    }}</span>
                     <el-icon><ArrowDown /></el-icon>
                   </span>
                   <template #dropdown>
                     <el-dropdown-menu>
-                      <el-dropdown-item @click="goFront">前台展示</el-dropdown-item>
-                      <el-dropdown-item divided @click="logout">退出登录</el-dropdown-item>
+                      <el-dropdown-item @click="goFront"
+                        >前台展示</el-dropdown-item
+                      >
+                      <el-dropdown-item divided @click="logout"
+                        >退出登录</el-dropdown-item
+                      >
                     </el-dropdown-menu>
                   </template>
                 </el-dropdown>
@@ -755,14 +875,22 @@ function onAdminNavActive() {
         </el-header>
         <el-main>
           <section v-if="activeMenu === 'batch'" class="page-wrap page-batch">
-            <div class="page-container">
+            <div class="page-container" style="height: 100%; margin: 0">
               <div class="batch-layout">
                 <aside class="batch-side">
                   <div class="batch-side-head">
-                    <el-button class="batch-refresh" size="small" title="刷新批次" @click="refreshBatches">
+                    <div>批次管理</div>
+                    <el-button
+                      class="batch-refresh"
+                      size="small"
+                      title="刷新批次"
+                      @click="refreshBatches"
+                    >
                       <el-icon><Refresh /></el-icon>
                     </el-button>
-                    <el-button type="primary" size="small" @click="openAddBatch">新增</el-button>
+                    <el-button type="primary" size="small" @click="openAddBatch"
+                      >新增</el-button
+                    >
                   </div>
                   <div class="batch-list">
                     <div
@@ -774,11 +902,20 @@ function onAdminNavActive() {
                     >
                       <div class="batch-item-main">
                         <div class="batch-name">{{ b.name }}</div>
-                        <div class="batch-time">{{ (b.created_at || '').slice(5, 16) || '-' }}</div>
+                        <div class="batch-time">
+                          {{ (b.created_at || "").slice(5, 16) || "-" }}
+                        </div>
                       </div>
-                      <el-icon class="batch-del" title="删除批次" @click.stop="deleteBatch(b)"><Delete /></el-icon>
+                      <el-icon
+                        class="batch-del"
+                        title="删除批次"
+                        @click.stop="deleteBatch(b)"
+                        ><Delete
+                      /></el-icon>
                     </div>
-                    <div v-if="!batches.length" class="batch-empty">暂无批次，请点击「新增」</div>
+                    <div v-if="!batches.length" class="batch-empty">
+                      暂无批次，请点击「新增」
+                    </div>
                   </div>
                 </aside>
                 <div class="batch-main">
@@ -799,371 +936,484 @@ function onAdminNavActive() {
                   />
                 </div>
               </div>
-              <page-modal ref="modalRef" :modal-config="modalConfig" @handle-click="handleClick">
+              <page-modal
+                ref="modalRef"
+                :modal-config="modalConfig"
+                @handle-click="handleClick"
+              >
                 <template #source_dir="scope">
                   <div class="upload-row">
-                    <el-input :model-value="scope.data.source_path" placeholder="请上传原始主范围 osgb 数据" readonly />
-                    <el-button @click="handleSelectSourceDir(scope.data)">上传</el-button>
+                    <el-input
+                      :model-value="scope.data.source_path"
+                      placeholder="请上传原始主范围 osgb 数据"
+                      readonly
+                    />
+                    <el-button @click="handleSelectSourceDir(scope.data)"
+                      >上传</el-button
+                    >
                   </div>
-                  <div v-if="scope.data.source_name" class="upload-name">原数据名称：{{ scope.data.source_name }}</div>
+                  <div v-if="scope.data.source_name" class="upload-name">
+                    原数据名称：{{ scope.data.source_name }}
+                  </div>
                 </template>
                 <template #update_dir="scope">
                   <div class="upload-row">
-                    <el-input :model-value="scope.data.update_path" placeholder="请上传需要更新替换的 osgb 数据（可选）" readonly />
-                    <el-button @click="handleSelectUpdateDir(scope.data)">上传</el-button>
+                    <el-input
+                      :model-value="scope.data.update_path"
+                      placeholder="请上传需要更新替换的 osgb 数据（可选）"
+                      readonly
+                    />
+                    <el-button @click="handleSelectUpdateDir(scope.data)"
+                      >上传</el-button
+                    >
                   </div>
-                  <div v-if="scope.data.update_name" class="upload-name">更新数据名称：{{ scope.data.update_name }}</div>
+                  <div v-if="scope.data.update_name" class="upload-name">
+                    更新数据名称：{{ scope.data.update_name }}
+                  </div>
                 </template>
               </page-modal>
             </div>
           </section>
-                    <section v-if="activeMenu === 'convert'" class="page-wrap page-convert">
+          <section
+            v-if="activeMenu === 'convert'"
+            class="page-wrap page-convert"
+          >
             <div class="app-shell" :class="`theme-${theme}`">
-                        <div class="app-body">
-                              <aside class="config-panel">
-                                <section class="config-section">
-                                  <div class="section-heading">
-                                    <Icon name="folder" :size="18" />
-                                    <h2 class="section-title">输入目录</h2>
-                                  </div>
-                                  <div class="dir-row">
-                                    <input
-                                      type="text"
-                                      :value="inputDir"
-                                      readonly
-                                      placeholder="选择 OSGB 数据根目录"
-                                      class="dir-input"
-                                      @click="selectInputDir"
-                                    />
-                                    <button
-                                      class="btn-outline btn-sm button-with-icon"
-                                      type="button"
-                                      @click="selectInputDir"
-                                    >
-                                      <Icon name="folderOpen" :size="16" />
-                                      浏览
-                                    </button>
-                                  </div>
-                                  <div
-                                    v-if="validationMessage"
-                                    class="validation-msg"
-                                    :class="{
-                                      'is-valid': validationValid === true,
-                                      'is-warn': validationValid === false,
-                                    }"
-                                  >
-                                    <Icon :name="validationValid ? 'check' : 'alert'" :size="16" />
-                                    <span>{{ validationMessage }}</span>
-                                  </div>
-                                  <div v-if="metadataMessage" class="metadata-msg">
-                                    <Icon name="file" :size="16" />
-                                    <span>{{ metadataMessage }}</span>
-                                  </div>
-                                  <div v-if="metadataDetail" class="metadata-detail">
-                                    {{ metadataDetail }}
-                                  </div>
-                                </section>
+              <div class="app-body">
+                <aside class="config-panel">
+                  <section class="config-section">
+                    <div class="section-heading">
+                      <Icon name="folder" :size="18" />
+                      <h2 class="section-title">输入目录</h2>
+                    </div>
+                    <div class="dir-row">
+                      <input
+                        type="text"
+                        :value="inputDir"
+                        readonly
+                        placeholder="选择 OSGB 数据根目录"
+                        class="dir-input"
+                        @click="selectInputDir"
+                      />
+                      <button
+                        class="btn-outline btn-sm button-with-icon"
+                        type="button"
+                        @click="selectInputDir"
+                      >
+                        <Icon name="folderOpen" :size="16" />
+                        浏览
+                      </button>
+                    </div>
+                    <div
+                      v-if="validationMessage"
+                      class="validation-msg"
+                      :class="{
+                        'is-valid': validationValid === true,
+                        'is-warn': validationValid === false,
+                      }"
+                    >
+                      <Icon
+                        :name="validationValid ? 'check' : 'alert'"
+                        :size="16"
+                      />
+                      <span>{{ validationMessage }}</span>
+                    </div>
+                    <div v-if="metadataMessage" class="metadata-msg">
+                      <Icon name="file" :size="16" />
+                      <span>{{ metadataMessage }}</span>
+                    </div>
+                    <div v-if="metadataDetail" class="metadata-detail">
+                      {{ metadataDetail }}
+                    </div>
+                  </section>
 
-                                <section class="config-section">
-                                  <div class="section-heading">
-                                    <Icon name="folderOpen" :size="18" />
-                                    <h2 class="section-title">小范围更新目录</h2>
-                                  </div>
-                                  <div class="update-actions">
-                                    <button
-                                      class="btn-outline btn-sm button-with-icon"
-                                      type="button"
-                                      :disabled="status === 'running'"
-                                      @click="addUpdateDir"
-                                    >
-                                      <Icon name="folderOpen" :size="16" />
-                                      新增
-                                    </button>
-                                  </div>
-                                  <div v-if="updateDirs.length === 0" class="update-empty">
-                                    未添加小范围更新目录
-                                  </div>
-                                  <div v-else class="update-list">
-                                    <div
-                                      v-for="(dir, index) in updateDirs"
-                                      :key="dir"
-                                      class="update-item"
-                                    >
-                                      <span class="update-path" :title="dir">{{ dir }}</span>
-                                      <button
-                                        class="icon-button update-remove"
-                                        type="button"
-                                        title="移除"
-                                        :disabled="status === 'running'"
-                                        @click="removeUpdateDir(index)"
-                                      >
-                                        <Icon name="x" :size="15" />
-                                      </button>
-                                    </div>
-                                  </div>
-                                </section>
+                  <section class="config-section">
+                    <div class="section-heading">
+                      <Icon name="folderOpen" :size="18" />
+                      <h2 class="section-title">小范围更新目录</h2>
+                    </div>
+                    <div class="update-actions">
+                      <button
+                        class="btn-outline btn-sm button-with-icon"
+                        type="button"
+                        :disabled="status === 'running'"
+                        @click="addUpdateDir"
+                      >
+                        <Icon name="folderOpen" :size="16" />
+                        新增
+                      </button>
+                    </div>
+                    <div v-if="updateDirs.length === 0" class="update-empty">
+                      未添加小范围更新目录
+                    </div>
+                    <div v-else class="update-list">
+                      <div
+                        v-for="(dir, index) in updateDirs"
+                        :key="dir"
+                        class="update-item"
+                      >
+                        <span class="update-path" :title="dir">{{ dir }}</span>
+                        <button
+                          class="icon-button update-remove"
+                          type="button"
+                          title="移除"
+                          :disabled="status === 'running'"
+                          @click="removeUpdateDir(index)"
+                        >
+                          <Icon name="x" :size="15" />
+                        </button>
+                      </div>
+                    </div>
+                  </section>
 
-                                <section class="config-section">
-                                  <div class="section-heading">
-                                    <Icon name="folderOpen" :size="18" />
-                                    <h2 class="section-title">输出目录</h2>
-                                  </div>
-                                  <div class="dir-row">
-                                    <input
-                                      type="text"
-                                      :value="outputDir"
-                                      readonly
-                                      placeholder="选择 3D Tiles 输出目录"
-                                      class="dir-input"
-                                      @click="selectOutputDir"
-                                    />
-                                    <button
-                                      class="btn-outline btn-sm button-with-icon"
-                                      type="button"
-                                      @click="selectOutputDir"
-                                    >
-                                      <Icon name="folderOpen" :size="16" />
-                                      浏览
-                                    </button>
-                                  </div>
-                                </section>
+                  <section class="config-section">
+                    <div class="section-heading">
+                      <Icon name="folderOpen" :size="18" />
+                      <h2 class="section-title">输出目录</h2>
+                    </div>
+                    <div class="dir-row">
+                      <input
+                        type="text"
+                        :value="outputDir"
+                        readonly
+                        placeholder="选择 3D Tiles 输出目录"
+                        class="dir-input"
+                        @click="selectOutputDir"
+                      />
+                      <button
+                        class="btn-outline btn-sm button-with-icon"
+                        type="button"
+                        @click="selectOutputDir"
+                      >
+                        <Icon name="folderOpen" :size="16" />
+                        浏览
+                      </button>
+                    </div>
+                  </section>
 
-                                <section class="config-section">
-                                  <div class="section-heading">
-                                    <Icon name="settings" :size="18" />
-                                    <h2 class="section-title">转换参数</h2>
-                                  </div>
+                  <section class="config-section">
+                    <div class="section-heading">
+                      <Icon name="settings" :size="18" />
+                      <h2 class="section-title">转换参数</h2>
+                    </div>
 
-                                  <div class="param-grid">
-                                    <div class="param-item">
-                                      <label for="cfg-x">中心经度 X</label>
-                                      <input
-                                        id="cfg-x"
-                                        v-model="config.x"
-                                        type="text"
-                                        placeholder="例如 116.391"
-                                      />
-                                    </div>
-                                    <div class="param-item">
-                                      <label for="cfg-y">中心纬度 Y</label>
-                                      <input
-                                        id="cfg-y"
-                                        v-model="config.y"
-                                        type="text"
-                                        placeholder="例如 39.904"
-                                      />
-                                    </div>
-                                    <div class="param-item">
-                                      <label for="cfg-offset">高度偏移</label>
-                                      <input
-                                        id="cfg-offset"
-                                        v-model.number="config.offset"
-                                        type="number"
-                                        step="0.1"
-                                      />
-                                    </div>
-                                    <div class="param-item">
-                                      <label for="cfg-lvl">最大层级</label>
-                                      <input
-                                        id="cfg-lvl"
-                                        v-model.number="config.max_lvl"
-                                        type="number"
-                                        min="1"
-                                        max="100"
-                                      />
-                                    </div>
-                                    <div class="param-item">
-                                      <label for="cfg-edge">边缘精细度 %</label>
-                                      <input
-                                        id="cfg-edge"
-                                        v-model.number="config.edge_precision"
-                                        type="number"
-                                        min="50"
-                                        max="98"
-                                        step="1"
-                                      />
-                                    </div>
-                                  </div>
+                    <div class="param-grid">
+                      <div class="param-item">
+                        <label for="cfg-x">中心经度 X</label>
+                        <input
+                          id="cfg-x"
+                          v-model="config.x"
+                          type="text"
+                          placeholder="例如 116.391"
+                        />
+                      </div>
+                      <div class="param-item">
+                        <label for="cfg-y">中心纬度 Y</label>
+                        <input
+                          id="cfg-y"
+                          v-model="config.y"
+                          type="text"
+                          placeholder="例如 39.904"
+                        />
+                      </div>
+                      <div class="param-item">
+                        <label for="cfg-offset">高度偏移</label>
+                        <input
+                          id="cfg-offset"
+                          v-model.number="config.offset"
+                          type="number"
+                          step="0.1"
+                        />
+                      </div>
+                      <div class="param-item">
+                        <label for="cfg-lvl">最大层级</label>
+                        <input
+                          id="cfg-lvl"
+                          v-model.number="config.max_lvl"
+                          type="number"
+                          min="1"
+                          max="100"
+                        />
+                      </div>
+                      <div class="param-item">
+                        <label for="cfg-edge">边缘精细度 %</label>
+                        <input
+                          id="cfg-edge"
+                          v-model.number="config.edge_precision"
+                          type="number"
+                          min="50"
+                          max="98"
+                          step="1"
+                        />
+                      </div>
+                    </div>
 
-                                  <div class="toggle-wrapper">
-                                    <input
-                                      id="cfg-output-transparency"
-                                      v-model="config.output_transparency"
-                                      type="checkbox"
-                                    />
-                                    <label for="cfg-output-transparency">输出后写入透明通道</label>
-                                  </div>
+                    <div class="toggle-wrapper">
+                      <input
+                        id="cfg-output-transparency"
+                        v-model="config.output_transparency"
+                        type="checkbox"
+                      />
+                      <label for="cfg-output-transparency"
+                        >输出后写入透明通道</label
+                      >
+                    </div>
 
-                                  <div class="toggle-wrapper pbr-toggle">
-                                    <input id="cfg-pbr" v-model="config.pbr" type="checkbox" />
-                                    <label for="cfg-pbr">启用 PBR 纹理</label>
-                                  </div>
+                    <div class="toggle-wrapper pbr-toggle">
+                      <input
+                        id="cfg-pbr"
+                        v-model="config.pbr"
+                        type="checkbox"
+                      />
+                      <label for="cfg-pbr">启用 PBR 纹理</label>
+                    </div>
 
-                                  <div class="toggle-wrapper pbr-toggle">
-                                    <input id="cfg-aggregate" v-model="config.aggregate" type="checkbox" />
-                                    <label for="cfg-aggregate">转换后瓦片聚合（合并碎片 tile，减少数量）</label>
-                                  </div>
-                                </section>
+                    <div class="toggle-wrapper pbr-toggle">
+                      <input
+                        id="cfg-aggregate"
+                        v-model="config.aggregate"
+                        type="checkbox"
+                      />
+                      <label for="cfg-aggregate"
+                        >转换后瓦片聚合（合并碎片 tile，减少数量）</label
+                      >
+                    </div>
+                  </section>
 
-                                <section class="config-section config-actions">
-                                  <button
-                                    class="btn-primary btn-start button-with-icon"
-                                    type="button"
-                                    :disabled="status === 'running' || !inputDir"
-                                    @click="startConversion"
-                                  >
-                                    <Icon name="play" :size="18" />
-                                    开始转换
-                                  </button>
-                                  <button
-                                    class="btn-danger button-with-icon"
-                                    type="button"
-                                    :disabled="status !== 'running'"
-                                    @click="cancelConversion"
-                                  >
-                                    <Icon name="square" :size="17" />
-                                    取消转换
-                                  </button>
-                                </section>
+                  <section class="config-section config-actions">
+                    <button
+                      class="btn-primary btn-start button-with-icon"
+                      type="button"
+                      :disabled="status === 'running' || !inputDir"
+                      @click="startConversion"
+                    >
+                      <Icon name="play" :size="18" />
+                      开始转换
+                    </button>
+                    <button
+                      class="btn-danger button-with-icon"
+                      type="button"
+                      :disabled="status !== 'running'"
+                      @click="cancelConversion"
+                    >
+                      <Icon name="square" :size="17" />
+                      取消转换
+                    </button>
+                  </section>
 
-                                <section v-if="outputDir" class="config-section preview-section">
-                                  <button
-                                    class="btn-primary btn-preview button-with-icon"
-                                    type="button"
-                                    @click="startPreview"
-                                  >
-                                    <Icon name="external" :size="18" />
-                                    Cesium 预览
-                                  </button>
-                                </section>
-                              </aside>
+                  <section
+                    v-if="outputDir"
+                    class="config-section preview-section"
+                  >
+                    <button
+                      class="btn-primary btn-preview button-with-icon"
+                      type="button"
+                      @click="startPreview"
+                    >
+                      <Icon name="external" :size="18" />
+                      Cesium 预览
+                    </button>
+                  </section>
+                </aside>
 
-                              <main class="log-panel">
-                                <div class="log-header">
-                                  <div class="section-heading">
-                                    <Icon name="terminal" :size="18" />
-                                    <h2 class="section-title">转换日志</h2>
-                                  </div>
-                                  <div class="log-actions">
-                                    <button
-                                      class="btn-outline btn-sm button-with-icon"
-                                      type="button"
-                                      @click="clearLog"
-                                      :disabled="logLines.length === 0"
-                                    >
-                                      <Icon name="clear" :size="15" />
-                                      清空
-                                    </button>
-                                    <button
-                                      class="btn-outline btn-sm button-with-icon"
-                                      type="button"
-                                      @click="openOutput"
-                                      :disabled="!outputDir"
-                                    >
-                                      <Icon name="external" :size="15" />
-                                      打开输出
-                                    </button>
-                                  </div>
-                                </div>
+                <main class="log-panel">
+                  <div class="log-header">
+                    <div class="section-heading">
+                      <Icon name="terminal" :size="18" />
+                      <h2 class="section-title">转换日志</h2>
+                    </div>
+                    <div class="log-actions">
+                      <button
+                        class="btn-outline btn-sm button-with-icon"
+                        type="button"
+                        @click="clearLog"
+                        :disabled="logLines.length === 0"
+                      >
+                        <Icon name="clear" :size="15" />
+                        清空
+                      </button>
+                      <button
+                        class="btn-outline btn-sm button-with-icon"
+                        type="button"
+                        @click="openOutput"
+                        :disabled="!outputDir"
+                      >
+                        <Icon name="external" :size="15" />
+                        打开输出
+                      </button>
+                    </div>
+                  </div>
 
-                                <div ref="logContainer" class="log-body">
-                                  <div v-if="logLines.length === 0" class="log-placeholder">
-                                    转换日志将在这里实时显示
-                                  </div>
-                                  <div
-                                    v-for="(line, i) in logLines"
-                                    :key="i"
-                                    class="log-line"
-                                    :class="{
-                                      'is-err': line.startsWith('[stderr]'),
-                                      'is-info': line.startsWith('[info]'),
-                                    }"
-                                  >
-                                    {{ line }}
-                                  </div>
-                                </div>
+                  <div ref="logContainer" class="log-body">
+                    <div v-if="logLines.length === 0" class="log-placeholder">
+                      转换日志将在这里实时显示
+                    </div>
+                    <div
+                      v-for="(line, i) in logLines"
+                      :key="i"
+                      class="log-line"
+                      :class="{
+                        'is-err': line.startsWith('[stderr]'),
+                        'is-info': line.startsWith('[info]'),
+                      }"
+                    >
+                      {{ line }}
+                    </div>
+                  </div>
 
-                                <div
-                                  v-if="statusMessage && status !== 'running'"
-                                  class="log-error-banner"
-                                >
-                                  <Icon name="alert" :size="17" />
-                                  <span>{{ statusMessage }}</span>
-                                </div>
-                              </main>
-                            </div>
-          
-            </div></section>
-          <section v-else-if="activeMenu === 'records'" class="page-wrap page-records">
+                  <div
+                    v-if="statusMessage && status !== 'running'"
+                    class="log-error-banner"
+                  >
+                    <Icon name="alert" :size="17" />
+                    <span>{{ statusMessage }}</span>
+                  </div>
+                </main>
+              </div>
+            </div>
+          </section>
+          <section
+            v-else-if="activeMenu === 'records'"
+            class="page-wrap page-records"
+          >
             <div class="records-toolbar">
               <h3>记录管理</h3>
               <div class="records-actions">
-                <el-input v-model="searchKeyword" placeholder="搜索名称/目录/状态" clearable style="width: 260px" />
-                <el-button type="primary" size="small" @click="loadRecords()">刷新</el-button>
+                <el-input
+                  v-model="searchKeyword"
+                  placeholder="搜索名称/目录/状态"
+                  clearable
+                  style="width: 260px"
+                />
+                <el-button type="primary" size="small" @click="loadRecords()"
+                  >刷新</el-button
+                >
               </div>
             </div>
-            <el-table :data="filteredRecords" v-loading="recordsLoading" border stripe style="width: 100%">
+            <el-table
+              :data="filteredRecords"
+              v-loading="recordsLoading"
+              border
+              stripe
+              style="width: 100%"
+            >
               <el-table-column prop="id" label="ID" width="70" />
-              <el-table-column prop="name" label="名称" min-width="180" show-overflow-tooltip />
-              <el-table-column prop="input_dir" label="输入目录" min-width="220" show-overflow-tooltip />
-              <el-table-column prop="output_dir" label="输出目录" min-width="220" show-overflow-tooltip />
+              <el-table-column
+                prop="name"
+                label="名称"
+                min-width="180"
+                show-overflow-tooltip
+              />
+              <el-table-column
+                prop="input_dir"
+                label="输入目录"
+                min-width="220"
+                show-overflow-tooltip
+              />
+              <el-table-column
+                prop="output_dir"
+                label="输出目录"
+                min-width="220"
+                show-overflow-tooltip
+              />
               <el-table-column prop="status" label="状态" width="110">
                 <template #default="{ row }">
-                  <el-tag :type="row.status === 'success' ? 'success' : (row.status === 'error' ? 'danger' : 'info')">{{ row.status || 'idle' }}</el-tag>
+                  <el-tag
+                    :type="
+                      row.status === 'success'
+                        ? 'success'
+                        : row.status === 'error'
+                          ? 'danger'
+                          : 'info'
+                    "
+                    >{{ row.status || "idle" }}</el-tag
+                  >
                 </template>
               </el-table-column>
               <el-table-column prop="tile_count" label="瓦片数" width="100" />
               <el-table-column prop="created_at" label="创建时间" width="180" />
               <el-table-column label="操作" width="100" fixed="right">
                 <template #default="{ row }">
-                  <el-button type="danger" size="small" @click="removeRecord(row.id)">删除</el-button>
+                  <el-button
+                    type="danger"
+                    size="small"
+                    @click="removeRecord(row.id)"
+                    >删除</el-button
+                  >
                 </template>
               </el-table-column>
             </el-table>
           </section>
         </el-main>
-        <el-footer height="50px" class="footer">© 2026 3DMine · OSGB → 3D Tiles</el-footer>
+        <el-footer height="50px" class="footer"
+          >© 2026 3DMine · OSGB → 3D Tiles</el-footer
+        >
       </el-container>
     </el-container>
   </div>
 
-    <!-- 新增批次 -->
-    <el-dialog v-model="batchDialogVisible" title="新增批次" width="420px">
-      <el-form label-width="90px">
-        <el-form-item label="批次名称" required>
-          <el-input v-model="batchName" placeholder="请输入批次名称" maxlength="60" @keyup.enter="saveBatch" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="batchDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="batchSaving" @click="saveBatch">保存</el-button>
-      </template>
-    </el-dialog>
+  <!-- 新增批次 -->
+  <el-dialog v-model="batchDialogVisible" title="新增批次" width="420px">
+    <el-form label-width="90px">
+      <el-form-item label="批次名称" required>
+        <el-input
+          v-model="batchName"
+          placeholder="请输入批次名称"
+          maxlength="60"
+          @keyup.enter="saveBatch"
+        />
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="batchDialogVisible = false">取消</el-button>
+      <el-button type="primary" :loading="batchSaving" @click="saveBatch"
+        >保存</el-button
+      >
+    </template>
+  </el-dialog>
 
-
-
-    <!-- 转换任务 -->
-    <el-dialog v-model="convertDialogVisible" title="转换任务" width="720px" :close-on-click-modal="false">
-      <div v-if="convertingRecord" class="convert-info">
-        <span>原数据：{{ convertingRecord.source_name || convertingRecord.source_path }}</span>
-        <span v-if="convertingRecord.update_name">｜更新：{{ convertingRecord.update_name }}</span>
+  <!-- 转换任务 -->
+  <el-dialog
+    v-model="convertDialogVisible"
+    :title="convertTitle"
+    width="720px"
+    :close-on-click-modal="false"
+  >
+    <div v-if="convertingRecord" class="convert-info">
+      <span
+        >原数据：{{
+          convertingRecord.source_name || convertingRecord.source_path
+        }}</span
+      >
+      <span v-if="convertingRecord.update_name"
+        >｜更新：{{ convertingRecord.update_name }}</span
+      >
+    </div>
+    <div class="convert-log" ref="convertLogContainer">
+      <div v-for="(line, i) in convertLogs" :key="i" class="log-line">
+        {{ line }}
       </div>
-      <div class="convert-log" ref="convertLogContainer">
-        <div v-for="(line, i) in convertLogs" :key="i" class="log-line">{{ line }}</div>
-        <div v-if="!convertLogs.length" class="log-empty">等待启动转换...</div>
-      </div>
-      <template #footer>
-        <el-button v-if="convertStatus === 'running'" @click="cancelRecordConversion">取消</el-button>
-        <el-button v-else type="primary" :disabled="!convertingRecord" @click="startRecordConversion">开始转换</el-button>
-        <el-button @click="convertDialogVisible = false">关闭</el-button>
-      </template>
-    </el-dialog>
-
+      <div v-if="!convertLogs.length" class="log-empty">等待启动转换...</div>
+    </div>
+    <template #footer>
+      <el-button
+        v-if="convertStatus === 'running'"
+        @click="cancelRecordConversion"
+        >取消</el-button
+      >
+      <el-button
+        v-else
+        type="primary"
+        :disabled="!convertingRecord"
+        @click="startRecordConversion"
+        >开始转换</el-button
+      >
+      <el-button @click="convertDialogVisible = false">关闭</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>
-
-
 .app-shell {
   --color-bg: #0b1117;
   --color-surface: #111a23;
@@ -1701,18 +1951,31 @@ function onAdminNavActive() {
   }
 }
 
-
-
-
 /* ===== 后台整体布局：完整照抄 yitai src/views/layout/layout.less ===== */
-.layout { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
-.main-content { height: 100%; }
+.layout {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+.main-content {
+  height: 100%;
+}
 /* yitai.css 的 .dark .el-container 会把内层容器也强制成 row，这里恢复纵向布局（否则 header/main/footer 横排错位） */
 .main-content > .el-container {
   flex-direction: column !important;
 }
-.main-content .footer { line-height: 50px; text-align: center; }
-.main-content .el-header { display: flex; color: #333; text-align: center; align-items: center; }
+.main-content .footer {
+  line-height: 50px;
+  text-align: center;
+}
+.main-content .el-header {
+  display: flex;
+  color: #333;
+  text-align: center;
+  align-items: center;
+}
 .main-content .el-aside {
   overflow: hidden;
   text-align: left;
@@ -1725,7 +1988,9 @@ function onAdminNavActive() {
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
-.main-content .el-aside::-webkit-scrollbar { display: none; }
+.main-content .el-aside::-webkit-scrollbar {
+  display: none;
+}
 .main-content .el-main {
   --el-main-padding: 10px;
   color: #333;
@@ -1733,17 +1998,56 @@ function onAdminNavActive() {
   overflow: auto;
 }
 .headerBg {
-  background-image: url("@/assets/img/logo.svg");
+  background-image: url("/images/bg-top.png");
 }
-.layout-header { display: flex; align-items: center; width: 100%; }
-.layout-header .content { flex: 1; display: flex; align-items: center; justify-content: space-between; margin-left: 23px; }
-.breadcrumb .bc-title { font-size: 14px; color: #ffffff; font-weight: 600; cursor: pointer; }
-.breadcrumb .bc-title:hover { opacity: 0.8; }
-.breadcrumb .bc-title.active { color: #ffffff; border-bottom: 2px solid #ffffff; padding-bottom: 2px; }
-.breadcrumb .bc-sep { margin: 0 8px; color: rgba(255, 255, 255, 0.65); }
-.info { display: flex; align-items: center; }
-.user-name { display: flex; align-items: center; gap: 6px; cursor: pointer; color: #333; font-size: 14px; outline: none; }
-.menu { display: flex; flex-direction: column; height: 100%; }
+.layout-header {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+.layout-header .content {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-left: 23px;
+}
+.breadcrumb .bc-title {
+  font-size: 14px;
+  color: #ffffff;
+  font-weight: 600;
+  cursor: pointer;
+}
+.breadcrumb .bc-title:hover {
+  opacity: 0.8;
+}
+.breadcrumb .bc-title.active {
+  color: #ffffff;
+  border-bottom: 2px solid #ffffff;
+  padding-bottom: 2px;
+}
+.breadcrumb .bc-sep {
+  margin: 0 8px;
+  color: rgba(255, 255, 255, 0.65);
+}
+.info {
+  display: flex;
+  align-items: center;
+}
+.user-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: #333;
+  font-size: 14px;
+  outline: none;
+}
+.menu {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
 
 /* ===== 后台侧栏：仅做布局适配，视觉保持 MyNavigate 默认样式（与前台一致） ===== */
 .admin-aside {
@@ -1792,7 +2096,16 @@ function onAdminNavActive() {
 /* ===== 批次管理页（yitai 深色科技风，配合 src/assets/yitai.css 的 body.dark 全覆盖） ===== */
 .page-batch {
   padding: 20px;
+  height: 100%;
   min-height: calc(100vh - 110px);
+  display: flex;
+  flex-direction: column;
+}
+.page-batch .page-content {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+  margin: 0 !important;
 }
 .page-batch .page-header {
   display: flex;
@@ -1814,6 +2127,11 @@ function onAdminNavActive() {
   display: flex;
   align-items: stretch;
   gap: 16px;
+  height: 100%;
+  width: 100%;
+}
+.page-content {
+  height: 100%;
 }
 .page-batch .batch-side {
   width: 260px;
@@ -1912,13 +2230,14 @@ function onAdminNavActive() {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  /* gap: 12px; */
   padding: 12px;
   background: transparent;
   border: 1px solid rgba(0, 188, 241, 0.2);
   border-radius: 4px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
+
 .page-batch .upload-row {
   display: flex;
   gap: 8px;
@@ -1935,21 +2254,67 @@ function onAdminNavActive() {
   border-radius: 2px;
   font-size: 12px;
 }
-.page-batch .st-idle { color: #c8d3dc; background: rgba(125, 141, 157, 0.2); }
-.page-batch .st-running { color: #f0c674; background: rgba(200, 155, 75, 0.2); }
-.page-batch .st-success { color: #7fd6a2; background: rgba(84, 178, 125, 0.2); }
-.page-batch .st-error { color: #f08b8b; background: rgba(217, 108, 108, 0.2); }
-.page-batch .st-cancelled { color: #c8d3dc; background: rgba(125, 141, 157, 0.2); }
+.page-batch .st-idle {
+  color: #c8d3dc;
+  background: rgba(125, 141, 157, 0.2);
+}
+.page-batch .st-running {
+  color: #f0c674;
+  background: rgba(200, 155, 75, 0.2);
+}
+.page-batch .st-success {
+  color: #7fd6a2;
+  background: rgba(84, 178, 125, 0.2);
+}
+.page-batch .st-error {
+  color: #f08b8b;
+  background: rgba(217, 108, 108, 0.2);
+}
+.page-batch .st-cancelled {
+  color: #c8d3dc;
+  background: rgba(125, 141, 157, 0.2);
+}
 
 /* ===== 页面布局（误删恢复） ===== */
-.footer { line-height: 50px; text-align: center; color: #666; }
-.page-wrap { min-height: 100%; }
-.page-convert { height: calc(100vh - 110px); }
-.page-convert .app-shell { height: 100%; min-width: 0; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,0.12); }
-.page-convert .app-shell .app-body { flex: 1; }
-.page-records { padding: 10px; background: #fff; border-radius: 8px; }
-.records-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-.records-toolbar h3 { margin: 0; font-size: 16px; color: #333; }
-.records-actions { display: flex; align-items: center; gap: 8px; }
-
+.footer {
+  line-height: 50px;
+  text-align: center;
+  color: #666;
+}
+.page-wrap {
+  min-height: 100%;
+}
+.page-convert {
+  height: calc(100vh - 110px);
+}
+.page-convert .app-shell {
+  height: 100%;
+  min-width: 0;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.12);
+}
+.page-convert .app-shell .app-body {
+  flex: 1;
+}
+.page-records {
+  padding: 10px;
+  background: #fff;
+  border-radius: 8px;
+}
+.records-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.records-toolbar h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #333;
+}
+.records-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 </style>

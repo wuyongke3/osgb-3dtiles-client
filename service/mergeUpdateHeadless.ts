@@ -1396,21 +1396,20 @@ function shouldRemoveBaseTile(
   if (coverageContains(bounds, coverage)) return true
   if (!coverageIntersects(bounds, coverage)) return false
 
+  // 严格防空洞策略（大范围兜底 + 上一级补层级）：
+  // 1) 叶子瓦片：只有更新范围 100% 覆盖时才裁剪，否则保留大范围瓦片，
+  //    实现“小范围没有的用大范围补”，边缘不会因裁剪出现空洞。
+  // 2) 非叶子瓦片：只有更新范围包含中心、且保留的子瓦片能 100% 覆盖
+  //    更新范围之外的区域时才删除本瓦片内容；只要子瓦片还有任何未覆盖
+  //    区域，就保留本瓦片内容作为“上一级兜底”，避免层级缺失形成空洞。
   if (hasChildren) {
-    // Hole-avoidance first: remove the stale content only when the update area
-    // contains this tile's center AND the kept children cover at least
-    // edgeSeamRatio of the part outside the update area. Otherwise keep it so
-    // the update boundary never becomes a visible hole.
     return (
       coverageContainsCenter(bounds, coverage) &&
-      coverageOutsideCoveredBy(bounds, coverage, keptChildBounds) >= options.edgeSeamRatio
+      coverageOutsideCoveredBy(bounds, coverage, keptChildBounds) >= 1 - 1e-9
     )
   }
 
-  // Leaf tiles: only remove them when they are almost entirely covered by the
-  // update area (>= max(edge precision ratio, 0.95)). Removing a leaf that is
-  // mostly outside the coverage would punch a visible hole at the boundary.
-  return coverageOverlapRatio(bounds, coverage) >= Math.max(options.removeOverlapRatio, 0.95)
+  return coverageOverlapRatio(bounds, coverage) >= 1 - 1e-9
 }
 
 function collectCoverageFromTileset(tilesetPath: string, deltaToBase: CoordinateDelta): OsgbBounds[] {
@@ -1517,6 +1516,17 @@ function pruneTilesetFile(
 
     if (bounds && removeTile) {
       if ((keepTile || (tile.children && tile.children.length > 0)) && !isExternalTileset) {
+        // 层级回填保护（“层级缺失用上一级补”）：边界瓦片如果保留的子瓦片
+        // 没有 100% 覆盖本瓦片范围，说明该层级会缺数据，此时保留本瓦片内容
+        // 作为上一级兜底，而不是删掉内容造成空洞。
+        const isPartialCoverage = coverageIntersects(bounds, coverage) && !coverageContains(bounds, coverage)
+        if (isPartialCoverage && coverageOutsideCoveredBy(bounds, coverage, keptRects) < 1 - 1e-9) {
+          keptRects.unshift(bounds)
+          if (hasChildren) {
+            tile.refine = 'REPLACE'
+          }
+          return { keep: true, rects: keptRects }
+        }
         if (tile.content) {
           delete tile.content
           removed++

@@ -156,3 +156,8 @@ button:disabled {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-text-dim);
 }
+
+/* 去掉导航 go-home 按钮的背景图片（组件库用内联 backgroundImage，需 !important 覆盖） */
+.my-navigate .go-home {
+  background-image: none !important;
+}

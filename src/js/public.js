@@ -16,7 +16,7 @@ export function setMine3d(map) {
 let currentScale = 1;
 
 ///////////////
-// 适配分辨率（抄 3dmine js/public.js bodyScreenScale，按屏幕宽度 / 设计稿宽度计算）
+// 适配分辨率（抄 3dmine js/public.js bodyScreenScale，按屏幕高度 / 设计稿高度计算（与 3dmine 原版一致））
 export const bodyScreenScale = () => {
   screenScale();
   window.onload = window.onresize = function () {
@@ -33,8 +33,8 @@ export const bodyScreenBack = () => {
 function screenScale() {
   var devicewidth = document.documentElement.clientWidth;
   var deviceheight = document.documentElement.clientHeight;
-  // 按屏幕宽度计算缩放，分母为设计稿宽度 1920
-  let scale = devicewidth / 1920;
+  // 与 3dmine 原版一致：按屏幕高度计算缩放，分母为设计稿高度 1320
+  let scale = deviceheight / 1320;
   currentScale = scale;
   // console.log("devicesize_w", devicewidth);
   // console.log("devicesize_h", deviceheight);

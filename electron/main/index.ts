@@ -1378,21 +1378,20 @@ function shouldRemoveBaseTile(
   if (coverageContains(bounds, coverage)) return true
   if (!coverageIntersects(bounds, coverage)) return false
 
+  // 严格防空洞策略（大范围兜底 + 上一级补层级）：
+  // 1) 叶子瓦片：只有更新范围 100% 覆盖时才裁剪，否则保留大范围瓦片，
+  //    实现“小范围没有的用大范围补”，边缘不会因裁剪出现空洞。
+  // 2) 非叶子瓦片：只有更新范围包含中心、且保留的子瓦片能 100% 覆盖
+  //    更新范围之外的区域时才删除本瓦片内容；只要子瓦片还有任何未覆盖
+  //    区域，就保留本瓦片内容作为“上一级兜底”，避免层级缺失形成空洞。
   if (hasChildren) {
-    // Hole-avoidance first: remove the stale content only when the update area
-    // contains this tile's center AND the kept children cover at least
-    // edgeSeamRatio of the part outside the update area. Otherwise keep it so
-    // the update boundary never becomes a visible hole.
     return (
       coverageContainsCenter(bounds, coverage) &&
-      coverageOutsideCoveredBy(bounds, coverage, keptChildBounds) >= options.edgeSeamRatio
+      coverageOutsideCoveredBy(bounds, coverage, keptChildBounds) >= 1 - 1e-9
     )
   }
 
-  // Leaf tiles: only remove them when they are almost entirely covered by the
-  // update area (>= max(edge precision ratio, 0.95)). Removing a leaf that is
-  // mostly outside the coverage would punch a visible hole at the boundary.
-  return coverageOverlapRatio(bounds, coverage) >= Math.max(options.removeOverlapRatio, 0.95)
+  return coverageOverlapRatio(bounds, coverage) >= 1 - 1e-9
 }
 
 function collectCoverageFromTileset(tilesetPath: string, deltaToBase: CoordinateDelta): OsgbBounds[] {
@@ -1499,6 +1498,17 @@ function pruneTilesetFile(
 
     if (bounds && removeTile) {
       if ((keepTile || (tile.children && tile.children.length > 0)) && !isExternalTileset) {
+        // 层级回填保护（“层级缺失用上一级补”）：边界瓦片如果保留的子瓦片
+        // 没有 100% 覆盖本瓦片范围，说明该层级会缺数据，此时保留本瓦片内容
+        // 作为上一级兜底，而不是删掉内容造成空洞。
+        const isPartialCoverage = coverageIntersects(bounds, coverage) && !coverageContains(bounds, coverage)
+        if (isPartialCoverage && coverageOutsideCoveredBy(bounds, coverage, keptRects) < 1 - 1e-9) {
+          keptRects.unshift(bounds)
+          if (hasChildren) {
+            tile.refine = 'REPLACE'
+          }
+          return { keep: true, rects: keptRects }
+        }
         if (tile.content) {
           delete tile.content
           removed++
@@ -1951,6 +1961,10 @@ interface ConversionResult {
   success: boolean
   error?: string
   outputDir?: string
+  /** 大范围单独转换的 3D Tiles 目录（分阶段合并时保留） */
+  sourceTilesPath?: string
+  /** 小范围单独转换的 3D Tiles 目录（分阶段合并时保留） */
+  updateTilesPath?: string
 }
 
 interface ConversionLogEntry {
@@ -2009,6 +2023,8 @@ function initDatabase(): void {
       update_path TEXT,
       merged_name TEXT,
       merged_path TEXT,
+      source_tiles_path TEXT,
+      update_tiles_path TEXT,
       transparent INTEGER DEFAULT 2,
       edge_precision INTEGER DEFAULT 85,
       aggregate INTEGER DEFAULT 2,
@@ -2023,6 +2039,8 @@ function initDatabase(): void {
   ensureColumn('records', 'update_path', 'update_path TEXT')
   ensureColumn('records', 'merged_name', 'merged_name TEXT')
   ensureColumn('records', 'merged_path', 'merged_path TEXT')
+  ensureColumn('records', 'source_tiles_path', 'source_tiles_path TEXT')
+  ensureColumn('records', 'update_tiles_path', 'update_tiles_path TEXT')
   ensureColumn('records', 'transparent', 'transparent INTEGER DEFAULT 2')
   ensureColumn('records', 'edge_precision', 'edge_precision INTEGER DEFAULT 85')
   ensureColumn('records', 'aggregate', 'aggregate INTEGER DEFAULT 2')
@@ -2037,8 +2055,16 @@ function updateRecordAfterConversion(recordId: number, result: ConversionResult)
     const outputDir = result.outputDir ?? ''
     const mergedName = outputDir ? path.basename(outputDir) : ''
     db.prepare(
-      'UPDATE records SET status = ?, output_dir = ?, merged_path = ?, merged_name = ? WHERE id = ?',
-    ).run(status, outputDir, outputDir, mergedName, Number(recordId))
+      'UPDATE records SET status = ?, output_dir = ?, merged_path = ?, merged_name = ?, source_tiles_path = ?, update_tiles_path = ? WHERE id = ?',
+    ).run(
+      status,
+      outputDir,
+      outputDir,
+      mergedName,
+      result.sourceTilesPath ?? '',
+      result.updateTilesPath ?? '',
+      Number(recordId),
+    )
     console.log('[db] record #' + recordId + ' updated: ' + status)
   } catch (err: unknown) {
     console.error('[db] record update after conversion failed: ' + (err instanceof Error ? err.message : String(err)))
@@ -2707,8 +2733,18 @@ async function startConversionFromParams(
   }
 
   if (updateDirs.length > 0) {
-    const tempConversionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tiles-merge-'))
     const baseConfigObj = buildConversionConfig(config, inputDir)
+
+    // 单独转换产物持久化到 outputDir 的兄弟目录（避开合并输出目录，避免被聚合/清理波及）
+    const sourceTilesDir = outputDir + '_source_tiles'
+    const updateTilesDir = outputDir + '_update_tiles'
+    try {
+      clearOutputDirectory(sourceTilesDir)
+      clearOutputDirectory(updateTilesDir)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      sender.send('conversion-stderr', `清理单独转换目录失败: ${message}\n`)
+    }
 
     lastOutputDir = outputDir
     lastConfigX = baseConfigObj.x !== undefined ? Number(baseConfigObj.x) : 0
@@ -2716,19 +2752,21 @@ async function startConversionFromParams(
     lastConfigOffset = Number(baseConfigObj.offset ?? 0)
 
     sender.send('conversion-status', 'running')
+    const tempUpdateDirs: string[] = []
     try {
-      sender.send('conversion-stdout', `开始 3D Tiles 分阶段合并，共 ${updateDirs.length} 个小范围更新目录\n`)
+      sender.send('conversion-stdout', `开始 3D Tiles 分阶段合并：先分别单独转换大范围/小范围，再合并，共 ${updateDirs.length} 个小范围更新目录\n`)
 
-      const baseOutputDir = path.join(tempConversionDir, 'base')
+      // 1. 单独转换大范围（持久保留，供前台切换查看）
       sender.send('conversion-stdout', `大范围转换参数: ${JSON.stringify(baseConfigObj)}\n`)
-      sender.send('conversion-stdout', `转换大范围: ${inputDir}\n`)
-      await run3dTileConversion(sender, exePath, exeDir, gdalDataPath, inputDir, baseOutputDir, baseConfigObj)
+      sender.send('conversion-stdout', `单独转换大范围: ${inputDir}\n`)
+      await run3dTileConversion(sender, exePath, exeDir, gdalDataPath, inputDir, sourceTilesDir, baseConfigObj)
 
       const baseOrigin = getCoverageOrigin(inputDir, baseConfigObj)
       if (!baseOrigin) {
         throw new Error('无法确定大范围转换原点，不能进行 3D Tiles 合并')
       }
 
+      // 2. 单独转换小范围（第一个持久保留，其余作为合并输入用临时目录）
       const convertedUpdates: Array<{ outputDir: string; deltaToBase: CoordinateDelta }> = []
       for (let index = 0; index < updateDirs.length; index++) {
         const updateDir = updateDirs[index]!
@@ -2740,9 +2778,16 @@ async function startConversionFromParams(
           throw new Error(`无法确定小范围转换原点: ${updateDir}`)
         }
 
-        const updateOutputDir = path.join(tempConversionDir, `update_${index}`)
+        let updateOutputDir: string
+        if (index === 0) {
+          updateOutputDir = updateTilesDir
+        } else {
+          const tempUpdateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tiles-update-'))
+          tempUpdateDirs.push(tempUpdateDir)
+          updateOutputDir = tempUpdateDir
+        }
         sender.send('conversion-stdout', `小范围转换参数 ${index + 1}/${updateDirs.length}: ${JSON.stringify(updateConfigObj)}\n`)
-        sender.send('conversion-stdout', `转换小范围 ${index + 1}/${updateDirs.length}: ${updateDir}\n`)
+        sender.send('conversion-stdout', `单独转换小范围 ${index + 1}/${updateDirs.length}: ${updateDir}\n`)
         await run3dTileConversion(sender, exePath, exeDir, gdalDataPath, updateDir, updateOutputDir, updateConfigObj)
 
         convertedUpdates.push({
@@ -2755,9 +2800,10 @@ async function startConversionFromParams(
         })
       }
 
+      // 3. 合并：大范围作为底图，接入小范围（大范围/小范围单独产物目录不被修改）
       sender.send('conversion-stdout', '正在 3D Tiles 层裁剪大范围并合并小范围\n')
       const mergeResult = mergeConvertedTilesets(
-        baseOutputDir,
+        sourceTilesDir,
         convertedUpdates,
         outputDir,
         config.edge_precision,
@@ -2766,18 +2812,30 @@ async function startConversionFromParams(
         'conversion-stdout',
         `3D Tiles 合并完成，边缘精细度 ${mergeResult.edgePrecision}%，覆盖细瓦片 ${mergeResult.coverageTileCount} 个，裁剪大范围瓦片节点 ${mergeResult.removedBaseTiles} 个，接入小范围瓦片节点 ${mergeResult.addedUpdateTiles} 个\n`,
       )
+
+      // 4. 透明通道：合并结果 + 大范围单独产物 + 小范围单独产物统一写入
       applyOutputTransparencyWithLog(outputDir, config, sender)
+      applyOutputTransparencyWithLog(sourceTilesDir, config, sender)
+      applyOutputTransparencyWithLog(updateTilesDir, config, sender)
+
       if (config.aggregate === true) {
         setImmediate(() => applyAggregationWithLog(outputDir, config, sender))
       }
       sender.send('conversion-status', 'success')
-      return { success: true, outputDir }
+      return {
+        success: true,
+        outputDir,
+        sourceTilesPath: sourceTilesDir,
+        updateTilesPath: updateTilesDir,
+      }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
       sender.send('conversion-status', isCancelled ? 'cancelled' : 'error')
       return { success: false, error: message }
     } finally {
-      cleanupMergedOsgbInput(tempConversionDir)
+      for (const dir of tempUpdateDirs) {
+        try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+      }
     }
   }
 
@@ -2897,7 +2955,7 @@ ipcMain.handle('records-list-by-batch', (_event, batchId: unknown) => {
 ipcMain.handle('records-add', (_event, record: Record<string, unknown>) => {
   if (!db) return { success: false, error: '数据库未初始化' }
   const result = db.prepare(
-    'INSERT INTO records (batch_id, name, input_dir, output_dir, status, tile_count, duration_sec, source_name, source_path, update_name, update_path, merged_name, merged_path, transparent, edge_precision, aggregate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO records (batch_id, name, input_dir, output_dir, status, tile_count, duration_sec, source_name, source_path, update_name, update_path, merged_name, merged_path, source_tiles_path, update_tiles_path, transparent, edge_precision, aggregate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   ).run(
     Number(record.batch_id ?? 0) || null,
     String(record.name ?? ''),
@@ -2912,6 +2970,8 @@ ipcMain.handle('records-add', (_event, record: Record<string, unknown>) => {
     String(record.update_path ?? ''),
     String(record.merged_name ?? ''),
     String(record.merged_path ?? ''),
+    String(record.source_tiles_path ?? ''),
+    String(record.update_tiles_path ?? ''),
     Number(record.transparent ?? 2),
     Number(record.edge_precision ?? 85),
     Number(record.aggregate ?? 2),
@@ -2923,7 +2983,7 @@ ipcMain.handle('records-update', (_event, id: unknown, patch: Record<string, unk
   if (!db) return { success: false, error: '数据库未初始化' }
   const sets: string[] = []
   const vals: unknown[] = []
-  for (const key of ['name', 'input_dir', 'output_dir', 'status', 'tile_count', 'duration_sec', 'batch_id', 'source_name', 'source_path', 'update_name', 'update_path', 'merged_name', 'merged_path', 'transparent', 'edge_precision', 'aggregate']) {
+  for (const key of ['name', 'input_dir', 'output_dir', 'status', 'tile_count', 'duration_sec', 'batch_id', 'source_name', 'source_path', 'update_name', 'update_path', 'merged_name', 'merged_path', 'source_tiles_path', 'update_tiles_path', 'transparent', 'edge_precision', 'aggregate']) {
     if (patch[key] !== undefined) {
       sets.push(key + ' = ?')
       vals.push(patch[key])
@@ -2998,6 +3058,33 @@ ipcMain.handle('check-tool', async () => {
 ipcMain.handle('open-output-dir', async (_event, dirPath: string) => {
   if (fs.existsSync(dirPath)) {
     shell.openPath(dirPath)
+  }
+})
+
+// Start serving 3D Tiles over HTTP for in-app (front page) preview
+ipcMain.handle('preview-serve', async (_event, params?: {
+  outputDir?: string
+}) => {
+  const outDir = params?.outputDir || lastOutputDir
+  if (!outDir) {
+    return { success: false, error: '没有可预览的输出目录' }
+  }
+  const tilesetPath = path.join(outDir, 'tileset.json')
+  if (!fs.existsSync(tilesetPath)) {
+    return { success: false, error: `未找到 tileset.json: ${tilesetPath}` }
+  }
+  try {
+    // Stop any existing preview server, then serve the selected output dir
+    stopStaticServer()
+    const port = await findFreePort()
+    previewServer = await startStaticServer(outDir, port)
+    previewPort = port
+    lastOutputDir = outDir
+    return { success: true, port, url: `http://localhost:${port}/tileset.json` }
+  } catch (err: unknown) {
+    stopStaticServer()
+    const message = err instanceof Error ? err.message : String(err)
+    return { success: false, error: `启动预览服务失败: ${message}` }
   }
 })
 
