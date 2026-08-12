@@ -39,6 +39,10 @@ export interface MergeUpdateParams {
   outputOpacity?: number
   output_opacity?: number
   pbr?: boolean
+  aggregate?: boolean
+  recordId?: number
+  aggregateTargetMB?: number
+  aggregateMaxMB?: number
   onStdout?: (text: string) => void
   onStderr?: (text: string) => void
   onStatus?: (status: MergeUpdateStatus) => void
@@ -100,8 +104,12 @@ export function buildMergeUpdateConversionParams(params: MergeUpdateParams) {
       output_transparency: outputTransparency,
       output_opacity: outputOpacity,
       pbr: params.pbr,
+      aggregate: params.aggregate,
+      aggregateTargetMB: params.aggregateTargetMB,
+      aggregateMaxMB: params.aggregateMaxMB,
     },
     updateDirs: normalizeUpdateDirs(params.updateDirs),
+    recordId: params.recordId,
   }
 }
 

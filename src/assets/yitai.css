@@ -1,0 +1,647 @@
+@charset "UTF-8";
+
+.dark {
+  --el-text-color-primary: #e3f8ff;
+
+  --el-text-color-regular: rgba(255, 255, 255, 0.8);
+
+  /* 深色蒙版背景色 */
+  --tech-ui-bg-color: #070e1a64;
+
+  /* 下拉选项hover时的颜色 */
+  --el-fill-color-light: #122640;
+
+  /* 菜单激活时的背景色 */
+  --el-menu-active-color: #122640;
+  --tech-ui-hover-color: #122640;
+
+  /* 数据图表中用的背景色 */
+  --tech-ui-bg-rock-color: #122640;
+
+  /* 数据刷新时的颜色 */
+  --el-mask-color: #122640b8;
+
+  /* 操作按钮的背景图片 */
+  --tech-ui-btn-background-image: url("./img/btn-image.svg");
+  --tech-ui-btn-hover-background-image: url("./img/btn-hover-image.svg");
+
+  color-scheme: light;
+
+  --el-color-primary: rgba(200, 231, 242, 0.7);
+
+  --el-color-primary-checked: rgba(21, 49, 85, 0.5); /* tech-ui changed */
+  --el-color-primary-light-3: rgba(21, 49, 85, 0.5); /* tech-ui changed */
+  --el-color-primary-light-7: rgba(21, 49, 85, 0.5); /* tech-ui border color */
+  --el-color-primary-light-9: rgba(21, 49, 85, 0.5); /* tech-ui hover color */
+  --el-fill-color-blank: rgba(21, 49, 85, 0.5); /* techui change */
+  --el-disabled-bg-color: var(--el-fill-color-blank);
+
+  /* 下拉菜单背景色 */
+  --el-bg-color-overlay: #122640;
+  .el-date-range-picker {
+    --el-datepicker-inrange-bg-color: var(--el-color-primary-light-3);
+    --el-disabled-bg-color: var(--el-color-primary-light-3);
+    --el-datepicker-inrange-hover-bg-color: var(--el-color-primary-checked);
+  }
+
+  .dark-table {
+    /** 表头背景色 */
+    --el-table-header-bg-color: rgba(21, 49, 85, 0.5);
+
+    /** 边框颜色 */
+    --el-border-color-lighter: #ebeef50e;
+    --el-table-border-color: var(--el-border-color-lighter);
+
+    --el-table-border: 0.1px solid #ebeef50e; /* 竖向border */
+    --el-table-header-border: 0.1px solid var(--el-table-border-color);
+    --el-table-row-hover-bg-color: var(--tech-ui-hover-color) !important;
+    --el-table-current-row-bg-color: var(--el-color-primary-light-9);
+    --el-table-tr-bg-color: var(--tech-ui-bg-color);
+    --el-table-expanded-cell-bg-color: var(--el-fill-color-blank);
+    --el-table-fixed-left-column: inset 10px 0 10px -10px rgba(0, 0, 0, 0.15);
+    --el-table-fixed-right-column: inset -10px 0 10px -10px rgba(0, 0, 0, 0.15);
+    --el-table-index: var(--el-index-normal);
+    /* hover行的样式 */
+    --el-table-row-hover-bg-color: #102436 !important;
+    background-color: var(--tech-ui-bg-color);
+    box-sizing: border-box;
+    color: var(--el-table-text-color);
+    font-size: 14px;
+  }
+
+  /** 下拉选项 start */
+
+  .el-select > .el-select__wrapper {
+    box-shadow: none;
+
+    background: rgba(77, 155, 255, 0.3);
+    border: 1px solid rgba(0, 188, 241, 0.2);
+    border-radius: 2px;
+  }
+
+  .el-select-dropdown__item {
+    margin: 0 12px 5px 5px;
+    font-family: "MicrosoftYaHei";
+    font-size: 14px;
+    color: #e3f8ff;
+    letter-spacing: 0;
+    line-height: 32px;
+    font-weight: 400;
+  }
+
+  .el-select-dropdown__list {
+    font-family: "MicrosoftYaHei";
+    font-size: 14px;
+    color: #e3f8ff;
+    letter-spacing: 0;
+    line-height: 32px;
+    font-weight: 400;
+  }
+
+  .el-select__popper.el-popper {
+    background: #122640;
+    border: 1px solid rgba(0, 188, 241, 0.2);
+    border-radius: 2px;
+    box-shadow: none;
+  }
+
+  .el-select-dropdown__item:hover {
+    background: rgba(121, 154, 198, 0.2);
+    border-radius: 2px;
+  }
+
+  .el-select-dropdown__item.is-selected {
+    background: rgba(121, 154, 198, 0.2);
+    border-radius: 2px;
+  }
+
+  .el-select__placeholder {
+    opacity: 0.8;
+    font-family: Helvetica;
+    font-size: 14px;
+    color: #c8e7f2;
+    letter-spacing: 0;
+    font-weight: 400;
+  }
+  /** 下拉选项 end */
+
+  /** 日期选择器 start */
+  .el-date-table td.today .el-date-table-cell__text {
+    color: #e3f8ff;
+  }
+  .el-range-separator {
+    color: #e3f8ff;
+  }
+  .el-date-picker__header {
+    padding: 12px;
+    margin: 0;
+  }
+
+  /** 日期选择器 end */
+
+  /** 输入框 start */
+  .el-input__wrapper {
+    background: rgba(77, 155, 255, 0.3);
+    border: 1px solid rgba(0, 188, 241, 0.2);
+    border-radius: 2px;
+    box-shadow: none;
+  }
+
+  .el-input__wrapper:hover {
+    box-shadow: none;
+  }
+  /** 输入框 end */
+
+  /** 弹出组件的小箭头 start */
+  .el-popper__arrow {
+    display: none;
+  }
+  /** 弹出组件的小箭头 start */
+
+  /** 滑动 start */
+  .el-scrollbar__wrap {
+    margin: 3px 0;
+  }
+  /** 滑动 end */
+
+  /** 选择时间的弹窗  */
+  .el-date-range-picker__time-picker-wrap .el-time-panel {
+    background: #214471;
+    border: 1px solid rgba(0, 188, 241, 0.2);
+    border-radius: 2px;
+  }
+
+  /** 按钮 start */
+  .el-button {
+    background-image: url("./img/btn-image.svg");
+    background-position: center;
+    background-repeat: no-repeat;
+    border: none;
+    border-radius: 0;
+    background-color: transparent;
+    padding: 0 27px;
+    background-size: cover;
+  }
+
+  .el-button:hover {
+    background-image: url("./img/btn-hover-image.svg");
+  }
+
+  .el-button.el-button--danger {
+    background: #8f2304;
+    border: 1px solid rgba(0, 188, 241, 0.2);
+  }
+  .el-button.el-button--success {
+    background: #0080008a;
+    border: 1px solid rgba(0, 188, 241, 0.2);
+  }
+  .el-button.el-button--warning {
+    background: #c3660ad6;
+    border: 1px solid rgba(0, 188, 241, 0.2);
+  }
+  /** 按钮 end */
+
+  .app {
+    /* 挂载页面的宽高为视口100% */
+    height: 100vh;
+    width: 100vw; /* 大背景设置 */
+    background-image: url("./img/page-bg.svg");
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: cover;
+  }
+
+  .el-overlay > .el-overlay-dialog > .el-dialog {
+    background-color: #111c27;
+    color: white;
+  }
+
+  .el-overlay
+    > .el-overlay-dialog
+    > .el-dialog
+    > .el-dialog__header
+    > .el-dialog__title {
+    color: #fff;
+  }
+
+  .el-overlay > .el-overlay-dialog > .el-dialog {
+    /* opacity: 0.9; */
+    background-image: linear-gradient(
+      179deg,
+      #000000 0%,
+      #081425 26%,
+      #0f1825 76%,
+      #000000 100%
+    );
+    border: 2px solid rgba(40, 88, 137, 1);
+    border-radius: 4px;
+  }
+
+  .el-dialog > .el-dialog__body {
+    font-family: "MicrosoftYaHei";
+    font-size: 14px;
+    color: #c8e7f2;
+    letter-spacing: 0;
+    font-weight: 400;
+  }
+  pageContent操作列 .el-table__body-wrapper tr td.el-table-fixed-column--left,
+  .el-table__body-wrapper tr td.el-table-fixed-column--right,
+  .el-table__body-wrapper tr th.el-table-fixed-column--left,
+  .el-table__body-wrapper tr th.el-table-fixed-column--right,
+  .el-table__footer-wrapper tr td.el-table-fixed-column--left,
+  .el-table__footer-wrapper tr td.el-table-fixed-column--right,
+  .el-table__footer-wrapper tr th.el-table-fixed-column--left,
+  .el-table__footer-wrapper tr th.el-table-fixed-column--right,
+  .el-table__header-wrapper tr td.el-table-fixed-column--left,
+  .el-table__header-wrapper tr td.el-table-fixed-column--right,
+  .el-table__header-wrapper tr th.el-table-fixed-column--left,
+  .el-table__header-wrapper tr th.el-table-fixed-column--right {
+    background: rgba(21, 49, 85, 0.992);
+    position: -webkit-sticky !important;
+    position: sticky !important;
+    z-index: calc(var(--el-table-index) + 1);
+  }
+
+  .el-table__body-wrapper tr td.el-table-fixed-column--left,
+  .el-table__body-wrapper tr td.el-table-fixed-column--right,
+  .el-table__body-wrapper tr th.el-table-fixed-column--left,
+  .el-table__body-wrapper tr th.el-table-fixed-column--right,
+  .el-table__footer-wrapper tr td.el-table-fixed-column--left,
+  .el-table__footer-wrapper tr td.el-table-fixed-column--right,
+  .el-table__footer-wrapper tr th.el-table-fixed-column--left,
+  .el-table__footer-wrapper tr th.el-table-fixed-column--right,
+  .el-table__header-wrapper tr td.el-table-fixed-column--left,
+  .el-table__header-wrapper tr td.el-table-fixed-column--right,
+  .el-table__header-wrapper tr th.el-table-fixed-column--left,
+  .el-table__header-wrapper tr th.el-table-fixed-column--right:hover {
+    background: rgba(21, 49, 85, 0.992);
+    position: -webkit-sticky !important;
+    position: sticky !important;
+    z-index: calc(var(--el-table-index) + 1);
+  }
+
+  /** 下拉选项 */
+  /* .el-select {
+    --el-select-input-color: rgba(200, 231, 242, 0.7);
+  }
+
+  .el-select__wrapper {
+    background: rgba(77, 155, 255, 0.3);
+    border: 1px solid rgba(0, 188, 241, 0.2);
+    border-radius: 2px;
+
+    font-family: "MicrosoftYaHei";
+    font-size: 14px;
+    color: #e9f9ff;
+    letter-spacing: 0;
+    line-height: 14px;
+    font-weight: 400;
+  } */
+
+  /* .el-table tr {
+    color: #ffffffb9;
+  } */
+  .el-textarea__inner {
+    box-shadow: none;
+    border: 1px solid rgba(0, 188, 241, 0.2);
+    background-color: #122640;
+    color: #a7a7a7;
+  }
+
+  .el-textarea__inner:hover {
+    box-shadow: none;
+    border: 1px solid rgba(0, 188, 241, 0.2);
+  }
+
+  .chart,
+  .user-point,
+  .article {
+    background-color: var(--tech-ui-bg-rock-color) !important;
+  }
+
+  .el-aside {
+    box-sizing: border-box;
+    flex-shrink: 0;
+    overflow: auto;
+    width: var(--el-aside-width, 300px);
+    background-color: var(--tech-ui-bg-color) !important; /* tech-ui changed */
+    /* background-image: none !important; */
+  }
+  .el-container {
+    box-sizing: border-box;
+    display: flex;
+    flex: 1;
+    flex-basis: auto;
+    flex-direction: row;
+    min-width: 0;
+    background-color: var(--tech-ui-bg-color);
+  }
+  .el-header {
+    --el-header-padding: 0 20px;
+    --el-header-height: 114px !important;
+    box-sizing: border-box;
+    flex-shrink: 0;
+    background-repeat: no-repeat;
+    background-position: top, center;
+    background-color: var(--tech-ui-bg-color); /* tech-ui changed */
+
+    height: var(--el-header-height);
+    padding: var(--el-header-padding);
+  }
+  .el-main {
+    --el-main-padding: 20px;
+    box-sizing: border-box;
+    display: block;
+    flex: 1;
+    flex-basis: auto;
+    overflow: auto;
+    background-color: var(--tech-ui-bg-color);
+
+    padding: var(--el-main-padding);
+
+    background-repeat: no-repeat;
+    background-size: cover;
+    background-position: center;
+    background-color: var(--tech-ui-bg-color) !important;
+    color: rgba(255, 255, 255, 0.837) !important; /* 点击查看里的文字强制白色 */
+
+    /* PageSearch */
+    .page-search {
+      background-color: var(--tech-ui-bg-color) !important;
+      padding: 25px;
+      margin: auto;
+      position: relative;
+      box-sizing: border-box;
+      /* box-shadow: inset 0 0 45px 25px rgba(124, 224, 247, 0.2); */
+    }
+
+    /* PageContent */
+    .page-content {
+      background-color: var(--tech-ui-bg-color) !important;
+      color: #7ce0f7;
+      padding: 25px;
+      margin: auto;
+      position: relative;
+      box-sizing: border-box;
+      /* background-image: url("./bg.svg"); */
+      background-size: contain;
+      background-position: center;
+      background-repeat: no-repeat;
+    }
+
+    /* 选项卡样式 */
+    .el-tabs {
+      .el-tabs__header {
+        border: none;
+        width: max-content;
+        background-color: #10101959;
+        .el-tabs__item {
+          border: 1px solid rgba(0, 188, 241, 0.2);
+          background-size: 120%;
+          border-radius: 5px 5px 0 0;
+          border-bottom: 0;
+
+          width: 204px;
+          margin-right: 5px;
+          /* padding: 0 60px; */
+          background-image: url("./img/tab-item.svg");
+          background-position: center;
+          background-repeat: no-repeat;
+          background-size: auto contain;
+        }
+
+        .is-active {
+          background-image: url("./img/tab-item-active.svg");
+        }
+      }
+      .el-tabs__content {
+        border: 1px solid rgba(0, 188, 241, 0.2);
+      }
+    }
+    .el-tabs__nav-wrap:after {
+      display: none;
+    }
+    .el-tabs__active-bar {
+      display: none;
+    }
+    .el-tabs__active-bar.is-top {
+      background: rgba(77, 155, 255, 0.3);
+    }
+    /** 选项卡  */
+    .el-tabs__nav-wrap:after {
+      background: rgba(77, 155, 255, 0.3);
+      height: 3px;
+    }
+  }
+
+  .el-footer {
+    --el-footer-padding: 0 20px;
+    --el-footer-height: 60px;
+    box-sizing: border-box;
+    flex-shrink: 0;
+    /* 商标防伪字颜色 */
+    opacity: 0.7;
+    font-family: CN-Regular;
+    font-size: 12px;
+    color: #ffffff;
+    letter-spacing: 0;
+    text-align: left;
+    font-weight: 400;
+
+    background-color: #122640;
+    background-image: url("./img/bg-bottom.svg");
+    background-repeat: no-repeat;
+    background-size: cover;
+    background-position: center;
+    height: var(--el-footer-height);
+    padding: var(--el-footer-padding);
+    background-color: var(--tech-ui-bg-color) !important; /* tech-ui changed */
+  }
+  .el-drawer {
+    background-color: #152133;
+  }
+
+  /* 选择器已选项 */
+  .el-cascader > .el-cascader__tags > .el-tag {
+    background: #235884;
+    color: #ffffffc6;
+  }
+
+  /* 分页器 */
+  .el-pagination > .el-pager > .number {
+    color: #ffffffcc;
+    background-image: url("./img/pagination.svg");
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: cover;
+    margin: 0 5px;
+    padding: 0;
+  }
+  .el-pagination > .el-pager > .is-active {
+    background-image: url("./img/pagination-active.svg");
+  }
+
+  /** 弹窗背景样式 */
+  .el-popper {
+    /* opacity: 0.9; */
+    background-image: linear-gradient(
+      179deg,
+      #000000 0%,
+      #081425 26%,
+      #0f1825 76%,
+      #000000 100%
+    );
+    border: 2px solid rgba(40, 88, 137, 1);
+    border-radius: 4px;
+  }
+
+  /** 展示全称的弹窗 */
+  .el-popper.is-dark {
+    opacity: 0.9;
+    background-image: linear-gradient(
+      179deg,
+      #000000 0%,
+      #081425 26%,
+      #0f1825 76%,
+      #000000 100%
+    );
+    border: 2px solid rgba(40, 88, 137, 1);
+    border-radius: 4px;
+  }
+
+  /** 日期选择器弹窗 */
+  .el-popper.el-picker__popper {
+    opacity: 0.9;
+    background-image: linear-gradient(
+      179deg,
+      #000000 0%,
+      #081425 26%,
+      #0f1825 76%,
+      #000000 100%
+    );
+    border: 2px solid rgba(40, 88, 137, 1);
+    border-radius: 4px;
+  }
+
+  /** 日期选择器内部  */
+  .el-picker-panel.el-date-range-picke {
+    background: rgba(77, 155, 255, 0.2);
+    border: 1px solid rgba(0, 188, 241, 0.2);
+    border-radius: 2px;
+  }
+
+  .el-date-range-picker {
+    --el-datepicker-inrange-bg-color: rgba(77, 155, 255, 0.4);
+    --el-datepicker-inrange-hover-bg-color: rgba(77, 154, 255, 0.5);
+
+    --el-datepicker-off-text-color: #575b663d;
+  }
+
+  /** 日期选择器未选中日期时无阴影 */
+  .el-input.is-disabled .el-input__wrapper {
+    box-shadow: none;
+  }
+
+  /** 日期选择器选中开始日期 */
+  .el-date-table td.start-date .el-date-table-cell {
+    border-radius: 2px 0 0 2px;
+  }
+
+  /** 日期选择器选中结束日期 */
+  .el-date-table td.end-date .el-date-table-cell {
+    border-radius: 0 2px 2px 0;
+  }
+
+  /** 时间选择器头部 */
+  .el-date-range-picker__time-header {
+    border: none;
+  }
+
+  /** 时间选择器内容无边框 */
+  .el-picker-panel__content.el-date-range-picker__content {
+    border: none;
+    padding-bottom: 0;
+  }
+
+  /** 日期选择器内容底部边框 */
+  .el-picker-panel__footer {
+    display: flex;
+    justify-content: center;
+    border: none;
+    padding: 13px 12px;
+  }
+
+  /** 日期选择器底部按钮 */
+  .el-picker-panel__footer > .el-button {
+    box-sizing: border-box;
+    width: 78.58px;
+    height: 32px;
+    background-size: contain;
+  }
+
+  /** 日期选择器选中日期 */
+  .el-date-table td.end-date .el-date-table-cell__text,
+  .el-date-table td.start-date .el-date-table-cell__text {
+    background: rgba(77, 155, 255, 0.7);
+    border-radius: 2px;
+  }
+  .el-date-table td.end-date .el-date-table-cell__text,
+  .el-date-table td.start-date .el-date-table-cell__text:hover {
+    font-family: ArialMT;
+    font-size: 12px;
+    color: #c8e7f2;
+    letter-spacing: 0;
+    text-align: center;
+    font-weight: 400;
+  }
+
+  /** 统一处理的样式 */
+  .is-hovering {
+    box-shadow: none !important;
+  }
+
+  /** 菜单选中样式 */
+  .el-menu-item.is-active {
+    color: #c8e7f2b3;
+  }
+
+  /** 提示框样式 */
+  .el-overlay-message-box {
+    .el-message-box {
+      background-color: #122640;
+    }
+  }
+
+  .el-table .sort-caret {
+    width: 1px;
+  }
+
+  .el-table .ascending .sort-caret.ascending {
+    border-bottom-color: #326ab4;
+  }
+
+  .el-table .descending .sort-caret.descending {
+    border-top-color: #326ab4;
+  }
+}
+
+/* 设置滚动条宽度，长度（仅后台 body.dark 生效，不影响前台） */
+body.dark::-webkit-scrollbar,
+body.dark *::-webkit-scrollbar {
+  width: 5px;
+  height: 10px;
+  display: none;
+  background-color: #ffffff00;
+}
+
+
+
+/* ===== el-input__inner 背景透明：组件库全局 input[type=text/number] 会套用 --color-bg 深色，这里仅后台 body.dark 下清掉 ===== */
+body.dark .el-input__inner {
+  background: transparent !important;
+}
+
+/* ===== el-input__inner 边框去掉：src/style.css 全局 input[type=text/number] 会套用 --color-border 边框，仅后台清除 ===== */
+body.dark .el-input__inner {
+  border: none !important;
+}

@@ -68,6 +68,19 @@ interface PreviewResult {
 type ConversionStatus = 'idle' | 'running' | 'success' | 'error' | 'cancelled'
 
 interface ElectronAPI {
+  login: (username: string, password: string) => Promise<{ success: boolean; error?: string; user?: { id: number; username: string; role: string } }>
+  records: {
+    list: () => Promise<any[]>
+    listByBatch: (batchId: number) => Promise<any[]>
+    add: (record: Record<string, unknown>) => Promise<{ success: boolean; id?: number; error?: string }>
+    update: (id: number, patch: Record<string, unknown>) => Promise<{ success: boolean; error?: string }>
+    delete: (id: number) => Promise<{ success: boolean; error?: string }>
+  }
+  batches: {
+    list: () => Promise<any[]>
+    add: (batch: { name: string; description?: string }) => Promise<{ success: boolean; id?: number; error?: string }>
+    delete: (id: number) => Promise<{ success: boolean; error?: string }>
+  }
   selectOsgbDir: () => Promise<string | null>
   selectOutputDir: () => Promise<string | null>
   readMetadata: (dirPath: string) => Promise<MetadataResult>

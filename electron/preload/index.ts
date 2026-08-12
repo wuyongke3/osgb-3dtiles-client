@@ -86,6 +86,29 @@ contextBridge.exposeInMainWorld('electronAPI', {
   checkTool: (): Promise<ToolCheckResult> =>
     ipcRenderer.invoke('check-tool'),
 
+  // ?? Auth / records (built-in database) ??
+  login: (username: string, password: string): Promise<{ success: boolean; error?: string; user?: { id: number; username: string; role: string } }> =>
+    ipcRenderer.invoke('auth-login', username, password),
+
+  records: {
+    list: (): Promise<unknown[]> => ipcRenderer.invoke('records-list'),
+    listByBatch: (batchId: number): Promise<unknown[]> => ipcRenderer.invoke('records-list-by-batch', batchId),
+    add: (record: Record<string, unknown>): Promise<{ success: boolean; id?: number; error?: string }> =>
+      ipcRenderer.invoke('records-add', record),
+    update: (id: number, patch: Record<string, unknown>): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke('records-update', id, patch),
+    delete: (id: number): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke('records-delete', id),
+  },
+
+  batches: {
+    list: (): Promise<unknown[]> => ipcRenderer.invoke('batches-list'),
+    add: (batch: { name: string; description?: string }): Promise<{ success: boolean; id?: number; error?: string }> =>
+      ipcRenderer.invoke('batches-add', batch),
+    delete: (id: number): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke('batches-delete', id),
+  },
+
   // ── File system ──
   openOutputDir: (dirPath: string): Promise<void> =>
     ipcRenderer.invoke('open-output-dir', dirPath),

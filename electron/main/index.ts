@@ -8,6 +8,7 @@ import http from 'node:http'
 import net from 'node:net'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { aggregateTiles } from './tileAggregator'
+import { DatabaseSync } from 'node:sqlite'
 
 const require = createRequire(import.meta.url)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -1942,6 +1943,8 @@ interface ConversionParams {
   outputDir?: string
   config: ConversionConfigParams
   updateDirs?: string[]
+  /** 关联的记录 id（日更转化表），转换完成后回写该记录 */
+  recordId?: number
 }
 
 interface ConversionResult {
@@ -1953,6 +1956,110 @@ interface ConversionResult {
 interface ConversionLogEntry {
   channel: string
   args: unknown[]
+}
+
+// ??? Local database (simple built-in store) ?????????????????????????
+let db: DatabaseSync | null = null
+
+function getDbPath(): string {
+  return path.join(app.getPath('userData'), 'app.db')
+}
+
+function ensureColumn(table: string, column: string, ddl: string): void {
+  if (!db) return
+  try {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+    if (!cols.some((c) => c.name === column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`)
+    }
+  } catch (err: unknown) {
+    console.error('[db] ensureColumn failed: ' + (err instanceof Error ? err.message : String(err)))
+  }
+}
+
+function initDatabase(): void {
+  const dbPath = getDbPath()
+  db = new DatabaseSync(dbPath)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      role TEXT DEFAULT 'admin',
+      created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+    CREATE TABLE IF NOT EXISTS batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+    CREATE TABLE IF NOT EXISTS records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT,
+      input_dir TEXT,
+      output_dir TEXT,
+      status TEXT,
+      tile_count INTEGER DEFAULT 0,
+      duration_sec REAL DEFAULT 0,
+      batch_id INTEGER,
+      source_name TEXT,
+      source_path TEXT,
+      update_name TEXT,
+      update_path TEXT,
+      merged_name TEXT,
+      merged_path TEXT,
+      transparent INTEGER DEFAULT 2,
+      edge_precision INTEGER DEFAULT 85,
+      aggregate INTEGER DEFAULT 2,
+      created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+  `)
+  // 迁移：给旧 records 表补充新增列
+  ensureColumn('records', 'batch_id', 'batch_id INTEGER')
+  ensureColumn('records', 'source_name', 'source_name TEXT')
+  ensureColumn('records', 'source_path', 'source_path TEXT')
+  ensureColumn('records', 'update_name', 'update_name TEXT')
+  ensureColumn('records', 'update_path', 'update_path TEXT')
+  ensureColumn('records', 'merged_name', 'merged_name TEXT')
+  ensureColumn('records', 'merged_path', 'merged_path TEXT')
+  ensureColumn('records', 'transparent', 'transparent INTEGER DEFAULT 2')
+  ensureColumn('records', 'edge_precision', 'edge_precision INTEGER DEFAULT 85')
+  ensureColumn('records', 'aggregate', 'aggregate INTEGER DEFAULT 2')
+  db.prepare('INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)').run('admin', '123456', 'admin')
+  console.log('[db] initialized: ' + dbPath)
+}
+
+function updateRecordAfterConversion(recordId: number, result: ConversionResult): void {
+  if (!db) return
+  try {
+    const status = result.success ? 'success' : 'error'
+    const outputDir = result.outputDir ?? ''
+    const mergedName = outputDir ? path.basename(outputDir) : ''
+    db.prepare(
+      'UPDATE records SET status = ?, output_dir = ?, merged_path = ?, merged_name = ? WHERE id = ?',
+    ).run(status, outputDir, outputDir, mergedName, Number(recordId))
+    console.log('[db] record #' + recordId + ' updated: ' + status)
+  } catch (err: unknown) {
+    console.error('[db] record update after conversion failed: ' + (err instanceof Error ? err.message : String(err)))
+  }
+}
+
+function addConversionRecord(inputDir: string, outputDir: string, status: string, tileCount = 0): void {
+  if (!db) return
+  try {
+    db.prepare(
+      'INSERT INTO records (name, input_dir, output_dir, status, tile_count, duration_sec) VALUES (?, ?, ?, ?, ?, 0)',
+    ).run(
+      'OSGB → 3D Tiles ' + new Date().toLocaleString('zh-CN'),
+      inputDir,
+      outputDir,
+      status,
+      tileCount,
+    )
+  } catch (err: unknown) {
+    console.error('[db] record add failed: ' + (err instanceof Error ? err.message : String(err)))
+  }
 }
 
 // ─── HTTP server for 3D Tiles preview ───────────────────────────────
@@ -2212,7 +2319,13 @@ async function startConversionTask(
 
   isConversionRunning = true
   try {
-    return await startConversionFromParams(sender, params)
+    const result = await startConversionFromParams(sender, params)
+    if (params.recordId) {
+      updateRecordAfterConversion(params.recordId, result)
+    } else if (result.outputDir) {
+      addConversionRecord(params.inputDir, result.outputDir, result.success ? 'success' : 'error')
+    }
+    return result
   } finally {
     isConversionRunning = false
   }
@@ -2321,10 +2434,12 @@ async function createWindow() {
   win = new BrowserWindow({
     title: '3DMine(osgb转3dtile工具)',
     icon: path.join(process.env.VITE_PUBLIC!, 'logo.png'),
-    width: 1200,
-    height: 800,
-    minWidth: 900,
-    minHeight: 600,
+    width: 1600,
+    height: 900,
+    minWidth: 1024,
+    minHeight: 700,
+    fullscreen: true,
+    autoHideMenuBar: true,
     webPreferences: {
       preload,
     },
@@ -2349,6 +2464,11 @@ async function createWindow() {
 
 app.whenReady().then(async () => {
   try {
+  try {
+    initDatabase()
+  } catch (err: unknown) {
+    console.error('[db] init failed: ' + (err instanceof Error ? err.message : String(err)))
+  }
     await startMergeUpdateApiServer()
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
@@ -2751,6 +2871,97 @@ async function startConversionFromParams(
     }
   })
 }
+
+// Start conversion
+// ??? Auth / records IPC ??????????????????????????????????????????????
+ipcMain.handle('auth-login', (_event, username: unknown, password: unknown) => {
+  if (!db) return { success: false, error: '数据库未初始化' }
+  const row = db.prepare('SELECT id, username, role FROM users WHERE username = ? AND password = ?').get(
+    String(username ?? ''),
+    String(password ?? ''),
+  ) as { id: number; username: string; role: string } | undefined
+  if (!row) return { success: false, error: '用户名或密码错误' }
+  return { success: true, user: { id: row.id, username: row.username, role: row.role } }
+})
+
+ipcMain.handle('records-list', () => {
+  if (!db) return []
+  return db.prepare('SELECT * FROM records ORDER BY id DESC').all() as unknown[]
+})
+
+ipcMain.handle('records-list-by-batch', (_event, batchId: unknown) => {
+  if (!db) return []
+  return db.prepare('SELECT * FROM records WHERE batch_id = ? ORDER BY id DESC').all(Number(batchId)) as unknown[]
+})
+
+ipcMain.handle('records-add', (_event, record: Record<string, unknown>) => {
+  if (!db) return { success: false, error: '数据库未初始化' }
+  const result = db.prepare(
+    'INSERT INTO records (batch_id, name, input_dir, output_dir, status, tile_count, duration_sec, source_name, source_path, update_name, update_path, merged_name, merged_path, transparent, edge_precision, aggregate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+  ).run(
+    Number(record.batch_id ?? 0) || null,
+    String(record.name ?? ''),
+    String(record.input_dir ?? ''),
+    String(record.output_dir ?? ''),
+    String(record.status ?? 'idle'),
+    Number(record.tile_count ?? 0),
+    Number(record.duration_sec ?? 0),
+    String(record.source_name ?? ''),
+    String(record.source_path ?? ''),
+    String(record.update_name ?? ''),
+    String(record.update_path ?? ''),
+    String(record.merged_name ?? ''),
+    String(record.merged_path ?? ''),
+    Number(record.transparent ?? 2),
+    Number(record.edge_precision ?? 85),
+    Number(record.aggregate ?? 2),
+  )
+  return { success: true, id: Number(result.lastInsertRowid) }
+})
+
+ipcMain.handle('records-update', (_event, id: unknown, patch: Record<string, unknown>) => {
+  if (!db) return { success: false, error: '数据库未初始化' }
+  const sets: string[] = []
+  const vals: unknown[] = []
+  for (const key of ['name', 'input_dir', 'output_dir', 'status', 'tile_count', 'duration_sec', 'batch_id', 'source_name', 'source_path', 'update_name', 'update_path', 'merged_name', 'merged_path', 'transparent', 'edge_precision', 'aggregate']) {
+    if (patch[key] !== undefined) {
+      sets.push(key + ' = ?')
+      vals.push(patch[key])
+    }
+  }
+  if (sets.length === 0) return { success: false, error: '无更新字段' }
+  vals.push(Number(id))
+  db.prepare('UPDATE records SET ' + sets.join(', ') + ' WHERE id = ?').run(...(vals as any[]))
+  return { success: true }
+})
+
+// 日更批次表
+ipcMain.handle('batches-list', () => {
+  if (!db) return []
+  return db.prepare('SELECT * FROM batches ORDER BY id DESC').all() as unknown[]
+})
+
+ipcMain.handle('batches-add', (_event, batch: Record<string, unknown>) => {
+  if (!db) return { success: false, error: '数据库未初始化' }
+  const name = String(batch.name ?? '').trim()
+  if (!name) return { success: false, error: '批次名称不能为空' }
+  const result = db.prepare('INSERT INTO batches (name, description) VALUES (?, ?)').run(name, String(batch.description ?? ''))
+  return { success: true, id: Number(result.lastInsertRowid) }
+})
+
+ipcMain.handle('batches-delete', (_event, id: unknown) => {
+  if (!db) return { success: false, error: '数据库未初始化' }
+  const batchId = Number(id)
+  db.prepare('DELETE FROM batches WHERE id = ?').run(batchId)
+  db.prepare('DELETE FROM records WHERE batch_id = ?').run(batchId)
+  return { success: true }
+})
+
+ipcMain.handle('records-delete', (_event, id: unknown) => {
+  if (!db) return { success: false, error: '数据库未初始化' }
+  db.prepare('DELETE FROM records WHERE id = ?').run(Number(id))
+  return { success: true }
+})
 
 // Start conversion
 ipcMain.handle('start-conversion', async (event, params: ConversionParams) => {

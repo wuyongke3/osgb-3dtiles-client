@@ -41,13 +41,17 @@ yarn-error.log*
 # ── test data ──
 test-data/
 
-# ?? Third-party runtime assets (restore locally, not uploaded) ??
+# Third-party runtime assets (restore locally, not uploaded)
 public/cesium/
 public/3dtile/
 
-# ?? Temp / scratch files ??
+# Temp / scratch files
 .tmp-*/
 vite.config.flat.txt
 
-# ?? Template assets ??
+# Template assets
 electron-vite-vue.gif
+
+# Vendor local package internals
+vendor/**/node_modules/
+
