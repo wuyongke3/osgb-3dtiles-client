@@ -297,12 +297,12 @@ function initMap() {
         fullscreenButton: false,
         contextmenu: { hasDefault: true },
         compass: false,
-        locationBar: false,
+        locationBar: { format: () => "" },
         clockAnimate: false,
         timeline: false,
       },
       basemaps: [],
-      terrain: { show: false },
+      terrain: { url: "", show: false },
     });
   } catch (e) {
     console.error("mars3d init failed:", e);
@@ -312,7 +312,7 @@ function initMap() {
 function toggleNav() {
   const nav = document.querySelector(
     ".navigate-system, my-navigate, .my-navigate",
-  );
+  ) as HTMLElement | null;
   if (!nav) return;
   const hidden = nav.style.display === "none";
   nav.style.display = hidden ? "" : "none";

@@ -91,6 +91,7 @@ interface ElectronAPI {
   checkTool: () => Promise<ToolCheckResult>
   openOutputDir: (dirPath: string) => Promise<void>
   startPreview: (params?: PreviewParams) => Promise<PreviewResult>
+  servePreview: (outputDir?: string) => Promise<PreviewResult>
   stopPreview: () => Promise<boolean>
   onConversionStdout: (callback: (text: string) => void) => CallbackRemover
   onConversionStderr: (callback: (text: string) => void) => CallbackRemover

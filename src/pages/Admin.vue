@@ -831,7 +831,7 @@ function onAdminNavActive(activeMenu?: any) {
           <div class="admin-nav">
             <MyNavigate
               height="100%"
-              width="249"
+              :width="249"
               username="admin"
               navigate-system-max-height="100%"
               :systemData="adminSystemData"

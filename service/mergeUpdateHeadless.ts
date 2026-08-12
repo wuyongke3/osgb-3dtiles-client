@@ -1394,24 +1394,13 @@ function shouldRemoveBaseTile(
   keptChildBounds: OsgbBounds[],
 ): boolean {
   if (coverageContains(bounds, coverage)) return true
-  if (!coverageIntersects(bounds, coverage)) return false
 
-  // 严格防空洞策略（大范围兜底 + 上一级补层级）：
-  // 1) 叶子瓦片：只有更新范围 100% 覆盖时才裁剪，否则保留大范围瓦片，
-  //    实现“小范围没有的用大范围补”，边缘不会因裁剪出现空洞。
-  // 2) 非叶子瓦片：只有更新范围包含中心、且保留的子瓦片能 100% 覆盖
-  //    更新范围之外的区域时才删除本瓦片内容；只要子瓦片还有任何未覆盖
-  //    区域，就保留本瓦片内容作为“上一级兜底”，避免层级缺失形成空洞。
-  if (hasChildren) {
-    return (
-      coverageContainsCenter(bounds, coverage) &&
-      coverageOutsideCoveredBy(bounds, coverage, keptChildBounds) >= 1 - 1e-9
-    )
-  }
-
+  // Anti-hole policy v3: a tile may be removed only when the update range
+  // covers 100% of its area (union of update leaf bounds), so the grafted
+  // update data replaces it without overlap. Anything partially covered keeps
+  // the base content as a coarser LOD fallback, so no edge/level gaps appear.
   return coverageOverlapRatio(bounds, coverage) >= 1 - 1e-9
 }
-
 function collectCoverageFromTileset(tilesetPath: string, deltaToBase: CoordinateDelta): OsgbBounds[] {
   const tileset = readJsonFile<TilesetJson>(tilesetPath)
   const coverage: OsgbBounds[] = []
@@ -1515,25 +1504,13 @@ function pruneTilesetFile(
     )
 
     if (bounds && removeTile) {
-      if ((keepTile || (tile.children && tile.children.length > 0)) && !isExternalTileset) {
-        // 层级回填保护（“层级缺失用上一级补”）：边界瓦片如果保留的子瓦片
-        // 没有 100% 覆盖本瓦片范围，说明该层级会缺数据，此时保留本瓦片内容
-        // 作为上一级兜底，而不是删掉内容造成空洞。
-        const isPartialCoverage = coverageIntersects(bounds, coverage) && !coverageContains(bounds, coverage)
-        if (isPartialCoverage && coverageOutsideCoveredBy(bounds, coverage, keptRects) < 1 - 1e-9) {
-          keptRects.unshift(bounds)
-          if (hasChildren) {
-            tile.refine = 'REPLACE'
-          }
-          return { keep: true, rects: keptRects }
-        }
-        if (tile.content) {
-          delete tile.content
-          removed++
-        }
-        return { keep: true, rects: keptRects }
+      // Fully covered by the update range: remove the whole subtree instead of
+      // keeping an empty placeholder node (the update data covers this area).
+      if (keepTile) {
+        // The root node must always be kept; if its content is missing the
+        // post-merge hole-filling pass will fill it.
+        return { keep: true, rects: [bounds] }
       }
-
       removed++
       return { keep: false, rects: [] }
     }
@@ -1557,6 +1534,181 @@ function pruneTilesetFile(
   const rootEmpty = !tileset.root?.content && (!tileset.root?.children || tileset.root.children.length === 0)
   writeJsonFile(tilesetPath, tileset)
   return { removed, empty: rootEmpty }
+}
+
+// --- Hole filling: give every level of the merged tileset real content ---
+interface FillContentSource {
+  uri: string
+  sourceDir: string
+  bounds: OsgbBounds | null
+  area: number
+}
+
+function bestFillContent(bounds: OsgbBounds, candidates: FillContentSource[]): FillContentSource | null {
+  if (candidates.length === 0) return null
+  let best: FillContentSource | null = null
+  let bestScore = -1
+  for (const candidate of candidates) {
+    if (!candidate.bounds) continue
+    let score: number
+    if (boundsContains(candidate.bounds, bounds)) {
+      // Full coverage: prefer the largest content that completely contains the
+      // hole area (coarsest geometry that still covers it entirely).
+      score = boundsArea(candidate.bounds) + 1e15
+    } else {
+      score = unionIntersectionArea(bounds, [candidate.bounds])
+    }
+    if (score > bestScore) {
+      bestScore = score
+      best = candidate
+    }
+  }
+  return best
+}
+
+function rewriteFillContentUri(uri: string, sourceDir: string, targetDir: string): string {
+  const sourcePath = path.resolve(sourceDir, uri)
+  let relative = path.relative(targetDir, sourcePath).replace(/\\/g, '/')
+  if (!relative.startsWith('.')) relative = `./${relative}`
+  return relative
+}
+
+function fillPlaceholderHoles(outputDir: string): number {
+  const rootTilesetPath = path.join(outputDir, 'tileset.json')
+  const tileset = readJsonFile<TilesetJson>(rootTilesetPath)
+  if (!tileset.root) return 0
+  const rootTilesetDir = path.dirname(rootTilesetPath)
+  let filled = 0
+
+  // Pre-collect every real content in the whole merged tileset, so hole
+  // filling can also borrow coarse base geometry (not only descendants).
+  const allContents: FillContentSource[] = []
+  const collectContents = (
+    tile: TileJson,
+    inheritedTransform: number[] | undefined,
+    tilesetDir: string,
+  ): void => {
+    const tileTransform = getCombinedTransform(inheritedTransform, tile)
+    const bounds = getTileBounds(tile, tileTransform)
+    const uri = getTileContentUri(tile)
+    const isExternalTileset = !!uri && uri.toLowerCase().endsWith('tileset.json')
+
+    if (isExternalTileset && uri) {
+      const externalPath = path.resolve(tilesetDir, uri)
+      if (fs.existsSync(externalPath)) {
+        const externalTileset = readJsonFile<TilesetJson>(externalPath)
+        if (externalTileset.root) {
+          collectContents(externalTileset.root, tileTransform, path.dirname(externalPath))
+        }
+      }
+    }
+    if (tile.children) {
+      for (const child of tile.children) {
+        collectContents(child, tileTransform, tilesetDir)
+      }
+    }
+    if (uri && !isExternalTileset) {
+      allContents.push({
+        uri,
+        sourceDir: tilesetDir,
+        bounds,
+        area: bounds ? boundsArea(bounds) : 0,
+      })
+    }
+  }
+  collectContents(tileset.root, undefined, rootTilesetDir)
+
+  const processTile = (
+    tile: TileJson,
+    inheritedTransform: number[] | undefined,
+    tilesetDir: string,
+    ancestorContent: FillContentSource | null,
+    allowGlobalBorrow: boolean,
+    isRootTile: boolean,
+  ): { bounds: OsgbBounds | null; childRects: OsgbBounds[]; contents: FillContentSource[] } => {
+    const tileTransform = getCombinedTransform(inheritedTransform, tile)
+    const bounds = getTileBounds(tile, tileTransform)
+    const uri = getTileContentUri(tile)
+    const isExternalTileset = !!uri && uri.toLowerCase().endsWith('tileset.json')
+    // Only the root-local frame may borrow content from the whole tileset.
+    // Any node with its own transform (e.g. the grafted update root) lives in
+    // a translated frame, so it must borrow only from its own subtree.
+    const localAllowGlobalBorrow = allowGlobalBorrow && (isRootTile || !tile.transform)
+    const childRects: OsgbBounds[] = []
+    const contents: FillContentSource[] = []
+
+    if (isExternalTileset && uri) {
+      const externalPath = path.resolve(tilesetDir, uri)
+      if (fs.existsSync(externalPath)) {
+        const externalTileset = readJsonFile<TilesetJson>(externalPath)
+        if (externalTileset.root) {
+          const externalResult = processTile(
+            externalTileset.root,
+            tileTransform,
+            path.dirname(externalPath),
+            ancestorContent,
+            localAllowGlobalBorrow,
+            false,
+          )
+          if (externalResult.bounds) childRects.push(externalResult.bounds)
+          contents.push(...externalResult.contents)
+        }
+      }
+    }
+
+    if (tile.children) {
+      for (const child of tile.children) {
+        const childResult = processTile(child, tileTransform, tilesetDir, ancestorContent, localAllowGlobalBorrow, false)
+        if (childResult.bounds) childRects.push(childResult.bounds)
+        contents.push(...childResult.contents)
+      }
+    }
+
+    const hasRealContent = !!uri && !isExternalTileset
+    if (hasRealContent) {
+      contents.push({
+        uri,
+        sourceDir: tilesetDir,
+        bounds,
+        area: bounds ? boundsArea(bounds) : 0,
+      })
+    }
+
+    // Any node without real content (internal placeholder or empty leaf) gets
+    // filled from the nearest ancestor content, falling back to the best
+    // content across the whole merged tileset (usually a coarse base tile),
+    // so every level has renderable data (no holes).
+    if (bounds && !hasRealContent && !isExternalTileset) {
+      let source = ancestorContent
+      if (!source) {
+        source = localAllowGlobalBorrow
+          ? bestFillContent(bounds, allContents)
+          : bestFillContent(bounds, contents)
+      }
+      if (source) {
+        const contentUri = rewriteFillContentUri(source.uri, source.sourceDir, tilesetDir)
+        tile.content = {
+          uri: contentUri,
+        }
+        if (childRects.length > 0) {
+          tile.refine = 'REPLACE'
+        }
+        filled++
+        contents.push({
+          uri: contentUri,
+          sourceDir: tilesetDir,
+          bounds,
+          area: boundsArea(bounds),
+        })
+      }
+    }
+
+    return { bounds, childRects, contents }
+  }
+
+  processTile(tileset.root, undefined, rootTilesetDir, null, true, true)
+  writeJsonFile(rootTilesetPath, tileset)
+  return filled
 }
 
 function transformPoint(matrix: number[] | undefined, point: [number, number, number]): [number, number, number] {
@@ -1861,7 +2013,7 @@ function computeHeightCorrection(
   return -medianDiff
 }
 
-function mergeConvertedTilesets(
+export function mergeConvertedTilesets(
   baseOutputDir: string,
   updateOutputDirs: Array<{ outputDir: string; deltaToBase: CoordinateDelta }>,
   outputDir: string,
@@ -1871,6 +2023,7 @@ function mergeConvertedTilesets(
   addedUpdateTiles: number
   coverageTileCount: number
   edgePrecision: number
+  filledHoleCount: number
 } {
   prepareMergedOutputDirectory(outputDir)
 
@@ -1935,11 +2088,13 @@ function mergeConvertedTilesets(
   }
 
   writeJsonFile(outputTilesetPath, mergedTileset)
+  const filledHoleCount = fillPlaceholderHoles(outputDir)
   return {
     removedBaseTiles: pruneResult.removed,
     addedUpdateTiles,
     coverageTileCount: coverage.length,
     edgePrecision: edgeOptions.edgePrecision,
+    filledHoleCount,
   }
 }
 
@@ -2399,7 +2554,7 @@ export async function runHeadlessMergeUpdate(
         )
         emitStdout(
           params,
-          `3D Tiles 合并完成，边缘精细度 ${mergeResult.edgePrecision}%，覆盖细瓦片 ${mergeResult.coverageTileCount} 个，裁剪大范围瓦片节点 ${mergeResult.removedBaseTiles} 个，接入小范围瓦片节点 ${mergeResult.addedUpdateTiles} 个\n`,
+          `3D Tiles 合并完成，边缘精细度 ${mergeResult.edgePrecision}%，覆盖细瓦片 ${mergeResult.coverageTileCount} 个，裁剪大范围瓦片节点 ${mergeResult.removedBaseTiles} 个，接入小范围瓦片节点 ${mergeResult.addedUpdateTiles} 个，补齐空洞瓦片节点 ${mergeResult.filledHoleCount ?? 0} 个\n`,
         )
         applyOutputTransparencyWithLog(outputDir, config, params)
         applyAggregationWithLog(outputDir, config, params)

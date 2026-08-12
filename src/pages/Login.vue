@@ -138,9 +138,9 @@ async function handleLogin() {
   margin: 0;
   text-align: center;
   font-size: 32px;
-  font-weight: 700;
+  font-weight: 500;
   letter-spacing: 6px;
-  color: #174a8f;
+  color: #ffffff;
 }
 .login-form-item {
   display: flex;
