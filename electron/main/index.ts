@@ -1490,7 +1490,7 @@ function collectB3dmFilesWithBounds(
 // 也避免粗 LOD 三角形内部(顶点稀疏处)残留大范围 base 小块。
 function collectVertexCoverageFromTilesets(
   updateOutputDirs: Array<{ outputDir: string; deltaToBase: CoordinateDelta }>,
-  cellSize = 5,
+  cellSize = 1,
 ): OsgbBounds[] {
   const files: B3dmFileEntry[] = []
   for (const update of updateOutputDirs) {
@@ -1575,14 +1575,10 @@ function collectVertexCoverageFromTilesets(
           const positions: Array<[number, number]> = []
           for (let index = 0; index < (accessor.count ?? 0); index++) {
             const offset = start + index * stride
-            const x = bin.readFloatLE(offset) + file.delta.x
-            const y = bin.readFloatLE(offset + 4) + file.delta.y
-            positions.push([x, y])
-            const column = Math.floor((x - minX) / cellSize)
-            const row = Math.floor((y - minY) / cellSize)
-            if (column >= 0 && column < cols && row >= 0 && row < rows) {
-              mask[row * cols + column] = 1
-            }
+            positions.push([
+              bin.readFloatLE(offset) + file.delta.x,
+              bin.readFloatLE(offset + 4) + file.delta.y,
+            ])
           }
           const isUint32 = indexAccessor.componentType === 5125
           const indexStride = isUint32 ? 4 : 2
@@ -2093,6 +2089,90 @@ function buildB3dmBuffer(parts: B3dmParts, glb: Buffer): Buffer {
     parts.batchTableBinary,
     glb,
   ])
+}
+
+// 更新区边缘 base 填充带宽度(米):裁剪 base 时把覆盖掩码边界向内部收缩该宽度,
+// 让 base 在更新区边缘外保留一圈填充带(与 update 微小重合),盖住交界处微小缝隙。
+// 使用 1m 细网格对掩码做整体腐蚀,只收缩边界带,避免按行段矩形内缩在更新区内部
+// 产生横向贯穿间隙(否则内部会重新露出 base 横条)。
+const EDGE_BASE_FILL_WIDTH = 2
+
+const EDGE_FILL_CELL = 1
+const EDGE_FILL_SOURCE_CELL = 1
+
+function buildEdgeFillCoverage(coverage: OsgbBounds[], fillWidth = EDGE_BASE_FILL_WIDTH): OsgbBounds[] {
+  if (fillWidth <= 0 || coverage.length === 0) return coverage
+  const cell = EDGE_FILL_SOURCE_CELL
+  const minX = Math.min(...coverage.map((c) => c.minX))
+  const maxX = Math.max(...coverage.map((c) => c.maxX))
+  const minY = Math.min(...coverage.map((c) => c.minY))
+  const maxY = Math.max(...coverage.map((c) => c.maxY))
+  const cols = Math.max(1, Math.ceil((maxX - minX) / cell))
+  const rows = Math.max(1, Math.ceil((maxY - minY) / cell))
+  const mask5 = new Uint8Array(cols * rows)
+  for (const cover of coverage) {
+    const c0 = Math.max(0, Math.floor((cover.minX - minX) / cell))
+    const c1 = Math.min(cols - 1, Math.floor((cover.maxX - minX) / cell))
+    const r0 = Math.max(0, Math.floor((cover.minY - minY) / cell))
+    const r1 = Math.min(rows - 1, Math.floor((cover.maxY - minY) / cell))
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) mask5[r * cols + c] = 1
+    }
+  }
+  // 上采样到 1m 细网格,再做形态学腐蚀(边界向内收缩),内部保持连通。
+  const scale = Math.max(1, Math.round(cell / EDGE_FILL_CELL))
+  const fineCols = cols * scale
+  const fineRows = rows * scale
+  let fine = new Uint8Array(fineCols * fineRows)
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (mask5[r * cols + c] === 0) continue
+      const fr = r * scale
+      const fc = c * scale
+      for (let dr = 0; dr < scale; dr++) {
+        const row = fr + dr
+        for (let dc = 0; dc < scale; dc++) fine[row * fineCols + fc + dc] = 1
+      }
+    }
+  }
+  const shrinkCells = Math.max(1, Math.ceil(fillWidth / EDGE_FILL_CELL))
+  for (let iter = 0; iter < shrinkCells; iter++) {
+    const next = new Uint8Array(fine.length)
+    for (let r = 0; r < fineRows; r++) {
+      for (let c = 0; c < fineCols; c++) {
+        if (fine[r * fineCols + c] === 0) continue
+        if (
+          (r > 0 && fine[(r - 1) * fineCols + c] === 0) ||
+          (r < fineRows - 1 && fine[(r + 1) * fineCols + c] === 0) ||
+          (c > 0 && fine[r * fineCols + c - 1] === 0) ||
+          (c < fineCols - 1 && fine[r * fineCols + c + 1] === 0)
+        ) continue
+        next[r * fineCols + c] = 1
+      }
+    }
+    fine = next
+  }
+  // 按 1m 行合并成矩形段(供 buildCoverageGrid 建立裁剪网格)。
+  const fineCell = EDGE_FILL_CELL
+  const segments: OsgbBounds[] = []
+  for (let r = 0; r < fineRows; r++) {
+    let c = 0
+    while (c < fineCols) {
+      if (fine[r * fineCols + c] === 0) { c++; continue }
+      let cEnd = c
+      while (cEnd < fineCols && fine[r * fineCols + cEnd] === 1) cEnd++
+      segments.push({
+        minX: minX + c * fineCell,
+        maxX: minX + cEnd * fineCell,
+        minY: minY + r * fineCell,
+        maxY: minY + (r + 1) * fineCell,
+        minZ: -Infinity,
+        maxZ: Infinity,
+      })
+      c = cEnd
+    }
+  }
+  return segments
 }
 
 function buildCoverageGrid(coverage: OsgbBounds[], cellSize = 40): CoverageGrid {
@@ -2875,12 +2955,20 @@ function blendUpdateBoundaryHeight(
   return modifiedVertices
 }
 
-function cutBaseGeometryInCoverage(outputDir: string, coverage: OsgbBounds[]): CutBaseGeometryResult {
+function cutBaseGeometryInCoverage(
+  outputDir: string,
+  coverage: OsgbBounds[],
+  edgeFillWidth = EDGE_BASE_FILL_WIDTH,
+): CutBaseGeometryResult {
   const rootTilesetPath = path.join(outputDir, 'tileset.json')
   const tileset = readJsonFile<TilesetJson>(rootTilesetPath)
   if (!tileset.root) return { cutTiles: 0, cutTriangles: 0, emptyTiles: 0 }
   const rootTilesetDir = path.dirname(rootTilesetPath)
-  const grid = buildCoverageGrid(coverage)
+  // 边缘 base 填充带:覆盖掩码整体腐蚀(边界向内收缩),base 在更新区边缘外
+  // 保留一圈与 update 微小重合的填充带,盖住交界处微小缝隙;内部保持连通,
+  // 不会在更新区内部重新露出 base(判断相交仍用原始覆盖区)。
+  const cutCoverage = buildEdgeFillCoverage(coverage, edgeFillWidth)
+  const grid = buildCoverageGrid(cutCoverage, 10)
   const outerCoverageBounds = unionBounds(coverage)
   const coverageOuterIntersects = (bounds: OsgbBounds): boolean => {
     if (!outerCoverageBounds) return false
