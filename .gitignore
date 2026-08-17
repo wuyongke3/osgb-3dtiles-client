@@ -55,3 +55,10 @@ electron-vite-vue.gif
 # Vendor local package internals
 vendor/**/node_modules/
 
+
+# Ad-hoc debug / diagnostics
+_*.cjs
+_*.ps1
+_*.mjs
+_render/
+debug.log

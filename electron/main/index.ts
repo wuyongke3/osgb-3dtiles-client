@@ -1675,8 +1675,8 @@ function pruneTilesetFile(
     }
 
     const hasChildren = !!(tile.children && tile.children.length > 0)
-    // ?? tileset ???????????? update ????????????
-    // ?? 100% ????????????????????????????
+    // The update tileset is merged as an external subtree of the base root.
+    // Borrow coarse base geometry at every level so no LOD is left empty.
     const removeTile = bounds && (
       isExternalTileset ? coverageOverlapRatio(bounds, coverage) >= 1 - 1e-9 : shouldRemoveBaseTile(bounds, coverage, options, hasChildren, keptRects)
     )
@@ -1708,8 +1708,8 @@ function pruneTilesetFile(
   let rootRemoved = false
   if (tileset.root) {
     const rootResult = pruneTile(tileset.root, parentTransform, !rootCanBeRemoved, skipRootTransform)
-    // ?? tileset ????????????????????????
-    // ???????????????????????????
+    // Collect every real content in the whole merged tileset.
+    // Prune tile logic.
     if (rootCanBeRemoved && !rootResult.keep) {
       rootRemoved = true
       delete tileset.root.content
@@ -1776,8 +1776,8 @@ function fillPlaceholderHoles(outputDir: string, coverage: OsgbBounds[]): number
     tilesetDir: string,
     skipRootTransform = false,
   ): void => {
-    // ? collectCoverageFromTileset ????????? ENU ?????
-    // bounds ????????????????????? coverage ???
+    // NOTE: tile bounding volumes are in ENU frame; use local frame
+    // for bounds comparisons with the base-local coverage mask.
     const tileTransform = skipRootTransform
       ? inheritedTransform
       : getCombinedTransform(inheritedTransform, tile)
@@ -1819,8 +1819,8 @@ function fillPlaceholderHoles(outputDir: string, coverage: OsgbBounds[]): number
     isRootTile: boolean,
     skipRootTransform = false,
   ): { bounds: OsgbBounds | null; childRects: OsgbBounds[]; contents: FillContentSource[] } => {
-    // ??? ENU ????? bounds ???? bounds ? coverage ??
-    // ?????????? collectCoverageFromTileset ???????
+    // Tile bounds are ENU; compare with base-local coverage.
+    // Use the same frame as collectCoverageFromTileset output.
     const tileTransform = skipRootTransform
       ? inheritedTransform
       : getCombinedTransform(inheritedTransform, tile)
@@ -1876,8 +1876,8 @@ function fillPlaceholderHoles(outputDir: string, coverage: OsgbBounds[]): number
     // filled from the nearest ancestor content, falling back to the best
     // content across the whole merged tileset (usually a coarse base tile),
     // so every level has renderable data (no holes).
-    // ???????????????????????????????
-    // ?? LOD ??????????? Cesium ????????????????
+    // Prune tile logic.
+    // so every LOD has renderable data for Cesium.
     if (bounds && !hasRealContent && !isExternalTileset
         && !((tile.extras as { mergeCutEmpty?: boolean } | undefined)?.mergeCutEmpty)
         && coverageIntersects(bounds, coverage) && !isRootTile) {
@@ -2095,7 +2095,7 @@ function buildB3dmBuffer(parts: B3dmParts, glb: Buffer): Buffer {
 // 让 base 在更新区边缘外保留一圈填充带(与 update 微小重合),盖住交界处微小缝隙。
 // 使用 1m 细网格对掩码做整体腐蚀,只收缩边界带,避免按行段矩形内缩在更新区内部
 // 产生横向贯穿间隙(否则内部会重新露出 base 横条)。
-const EDGE_BASE_FILL_WIDTH = 2
+const EDGE_BASE_FILL_WIDTH = 3
 
 const EDGE_FILL_CELL = 1
 const EDGE_FILL_SOURCE_CELL = 1
@@ -2336,7 +2336,423 @@ interface VertexAttributeReader {
 
 
 
-function cutGlbTriangles(glb: Buffer, grid: CoverageGrid): CutGlbResult {
+
+// ==================== 矢量裁剪:用 update 三角形精确裁剪 base ====================
+// 思路:把更新区边界带(默认 band 米)内的 update 三角形按 fillWidth 内缩后建立空间索引,
+// base 三角形先用 1m 掩码粗分类(整删/保留),跨边界的三角形用 update 三角形做矢量减法,
+// 裁剪线完全贴合 update 真实几何边缘,而不是 1m 矩形掩码。
+
+interface VectorCutInput {
+  coarseGrid: CoverageGrid
+  updateTriIndex: UpdateTriIndex | null
+  // Inner region grid (coverage eroded by the boundary band width). Used to cut
+  // away base polygons that cross into the update interior when the vector-only
+  // path skipped the 1m rect subtraction.
+  innerGrid: CoverageGrid | null
+}
+
+
+interface UpdateTriIndex {
+  minX: number
+  minY: number
+  cellSize: number
+  cols: number
+  rows: number
+  cells: number[][]
+  tris: Float32Array
+  triCount: number
+}
+
+function cross2D(ax: number, ay: number, bx: number, by: number, cx: number, cy: number): number {
+  return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+}
+
+// 多边形沿有向边裁剪:内侧(左半平面)留在 inner,外侧进入 outer。
+// 用于对 update 三角形逐边做减法(P 减 Q)。
+function clipPolyByDirectedEdge(
+  poly: PolyVertex[],
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): { inner: PolyVertex[]; outer: PolyVertex[] } {
+  const signedDist = (p: PolyVertex): number => (bx - ax) * (p.y - ay) - (by - ay) * (p.x - ax)
+  const inner: PolyVertex[] = []
+  const outer: PolyVertex[] = []
+  const n = poly.length
+  for (let i = 0; i < n; i++) {
+    const a = poly[i]!
+    const b = poly[(i + 1) % n]!
+    const da = signedDist(a)
+    const db = signedDist(b)
+    const aIn = da >= 0
+    const bIn = db >= 0
+    if (aIn) inner.push(a)
+    else outer.push(a)
+    if (aIn !== bIn) {
+      const t = da / (da - db)
+      const cross: PolyVertex = {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+        z: a.z + (b.z - a.z) * t,
+        w: [
+          a.w[0] + (b.w[0] - a.w[0]) * t,
+          a.w[1] + (b.w[1] - a.w[1]) * t,
+          a.w[2] + (b.w[2] - a.w[2]) * t,
+        ] as [number, number, number],
+      }
+      inner.push(cross)
+      outer.push(cross)
+    }
+  }
+  return { inner, outer }
+}
+
+// 凸多边形 P 减 Q(Q 为逆时针凸多边形,通常为三角形)。
+// 返回 P 中落在 Q 外的多边形集合(每块仍是凸多边形,可直接扇形三角化)。
+function subtractConvexPolyFromPoly(poly: PolyVertex[], q: Array<[number, number]>): PolyVertex[][] {
+  const results: PolyVertex[][] = []
+  let stack: PolyVertex[][] = [poly]
+  const n = q.length
+  for (let i = 0; i < n; i++) {
+    const [ax, ay] = q[i]!
+    const [bx, by] = q[(i + 1) % n]!
+    const nextStack: PolyVertex[][] = []
+    for (const p of stack) {
+      const { inner, outer } = clipPolyByDirectedEdge(p, ax, ay, bx, by)
+      if (outer.length >= 3) results.push(outer)
+      if (inner.length >= 3) nextStack.push(inner)
+    }
+    stack = nextStack
+    if (stack.length === 0) break
+  }
+  // stack 中剩余的部分完全落在 Q 内(应被剔除),results 即 P 减 Q。
+  return results
+}
+
+function lineIntersect2D(
+  ax: number, ay: number, bx: number, by: number,
+  cx: number, cy: number, dx: number, dy: number,
+): [number, number] | null {
+  const denom = (bx - ax) * (dy - cy) - (by - ay) * (dx - cx)
+  if (Math.abs(denom) < 1e-12) return null
+  const t = ((cx - ax) * (dy - cy) - (cy - ay) * (dx - cx)) / denom
+  return [ax + t * (bx - ax), ay + t * (by - ay)]
+}
+
+// 逆时针三角形每条边沿左法线(指向内部)平移 width,求三条边交点得到内缩三角形。
+// 退化(面积过小)返回 null,表示该三角形不参与裁剪。
+function shrinkTriangle2D(
+  ax: number, ay: number, bx: number, by: number, cx: number, cy: number, width: number,
+): [number, number, number, number, number, number] | null {
+  // Vector cut: use update triangles to cut base precisely.
+  const inputArea2 = cross2D(ax, ay, bx, by, cx, cy)
+  if (Math.abs(inputArea2) < 1e-6) return null
+  const shrinkEdge = (x1: number, y1: number, x2: number, y2: number): [number, number, number, number] | null => {
+    const dx = x2 - x1
+    const dy = y2 - y1
+    const len = Math.hypot(dx, dy)
+    if (len < 1e-9) return null
+    // (convex polygon)
+    const nx = -dy / len
+    const ny = dx / len
+    return [x1 + nx * width, y1 + ny * width, x2 + nx * width, y2 + ny * width]
+  }
+  const e1 = shrinkEdge(ax, ay, bx, by)
+  const e2 = shrinkEdge(bx, by, cx, cy)
+  const e3 = shrinkEdge(cx, cy, ax, ay)
+  if (!e1 || !e2 || !e3) return null
+  const A = lineIntersect2D(e3[0], e3[1], e3[2], e3[3], e1[0], e1[1], e1[2], e1[3])
+  const B = lineIntersect2D(e1[0], e1[1], e1[2], e1[3], e2[0], e2[1], e2[2], e2[3])
+  const C = lineIntersect2D(e2[0], e2[1], e2[2], e2[3], e3[0], e3[1], e3[2], e3[3])
+  if (!A || !B || !C) return null
+  // Returns base parts outside the update triangles.
+  // Triangulate kept polygons with fan; avoid gaps,
+  // keep base fill near the edge to avoid holes.
+  const inTri = (px: number, py: number): boolean => {
+    const w0 = ((bx - px) * (cy - py) - (by - py) * (cx - px)) / inputArea2
+    const w1 = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) / inputArea2
+    const w2 = 1 - w0 - w1
+    return w0 >= -1e-6 && w1 >= -1e-6 && w2 >= -1e-6
+  }
+  if (!inTri(A[0], A[1]) || !inTri(B[0], B[1]) || !inTri(C[0], C[1])) return null
+  const area = cross2D(A[0], A[1], B[0], B[1], C[0], C[1])
+  if (area <= 1e-6) return null
+  return [A[0], A[1], B[0], B[1], C[0], C[1]]
+}
+
+// 查询覆盖区边界距离(米):正值在覆盖区内,负值在覆盖区外;距离未知返回 null。
+function queryBoundaryDistanceOrNull(map: CoverageDistanceMap | null, x: number, y: number): number | null {
+  if (!map) return 0
+  const column = Math.floor((x - map.minX) / map.cellSize)
+  const row = Math.floor((y - map.minY) / map.cellSize)
+  if (column < 0 || column >= map.cols || row < 0 || row >= map.rows) return null
+  const cells = map.dist[row * map.cols + column]
+  if (!isFinite(cells) || cells === 0) return null
+  const magnitude = Math.max(0, Math.abs(cells) - 0.5) * map.cellSize
+  return cells > 0 ? magnitude : -magnitude
+}
+
+// 两个多边形顶点集合相同(顺序无关),用于判断减法是否实际发生。
+function polygonsSameVertices(a: PolyVertex[], b: PolyVertex[]): boolean {
+  if (a.length !== b.length) return false
+  for (const va of a) {
+    let found = false
+    for (const vb of b) {
+      if (
+        Math.abs(va.x - vb.x) < 1e-6
+        && Math.abs(va.y - vb.y) < 1e-6
+        && Math.abs(va.z - vb.z) < 1e-6
+      ) {
+        found = true
+        break
+      }
+    }
+    if (!found) return false
+  }
+  return true
+}
+
+// 用 update 三角形(已内缩 fillWidth)对 base 多边形集合做矢量减法。
+function subtractUpdateTrisFromPolys(
+  polys: PolyVertex[][],
+  triIndex: UpdateTriIndex,
+  candidates: number[],
+  bbox: [number, number, number, number],
+  candidateLimit = 256,
+): { polys: PolyVertex[][]; changed: boolean } {
+  let current = polys
+  let changed = false
+  // 候选过多时按到多边形包围盒中心的距离排序,只取最近的 N 个,
+  // 避免按网格顺序取前 N 个时漏掉更新区内部的三角形(导致墙体残留)。
+  let iter = candidates
+  if (candidates.length > candidateLimit) {
+    const cx = (bbox[0] + bbox[2]) / 2
+    const cy = (bbox[1] + bbox[3]) / 2
+    iter = candidates
+      .map((idx) => {
+        const base = idx * 6
+        const tx = (triIndex.tris[base]! + triIndex.tris[base + 2]! + triIndex.tris[base + 4]!) / 3
+        const ty = (triIndex.tris[base + 1]! + triIndex.tris[base + 3]! + triIndex.tris[base + 5]!) / 3
+        return { idx, d: (tx - cx) * (tx - cx) + (ty - cy) * (ty - cy) }
+      })
+      .sort((a, b) => a.d - b.d)
+      .map((o) => o.idx)
+      .slice(0, candidateLimit)
+  }
+  for (const triIdx of iter) {
+    const base = triIdx * 6
+    const q: Array<[number, number]> = [
+      [triIndex.tris[base]!, triIndex.tris[base + 1]!],
+      [triIndex.tris[base + 2]!, triIndex.tris[base + 3]!],
+      [triIndex.tris[base + 4]!, triIndex.tris[base + 5]!],
+    ]
+    // 快速包围盒过滤:与 base 三角形包围盒不相交的 update 三角形直接跳过。
+    const qMinX = Math.min(q[0]![0], q[1]![0], q[2]![0])
+    const qMaxX = Math.max(q[0]![0], q[1]![0], q[2]![0])
+    const qMinY = Math.min(q[0]![1], q[1]![1], q[2]![1])
+    const qMaxY = Math.max(q[0]![1], q[1]![1], q[2]![1])
+    if (qMaxX < bbox[0] || qMinX > bbox[2] || qMaxY < bbox[1] || qMinY > bbox[3]) continue
+    const next: PolyVertex[][] = []
+    let localChanged = false
+    for (const poly of current) {
+      const parts = subtractConvexPolyFromPoly(poly, q)
+      if (parts.length === 1 && polygonsSameVertices(parts[0]!, poly)) {
+        next.push(poly)
+      } else {
+        localChanged = true
+        next.push(...parts)
+      }
+    }
+    if (localChanged) changed = true
+    current = next
+    if (current.length === 0) break
+  }
+  return { polys: current, changed }
+}
+
+// 建立 update 边界带三角形索引:只收集质心距覆盖区边界 < band 米的三角形,
+// 按 fillWidth 内缩后写入 10m 空间网格,供 base 跨边界三角形查询。
+function buildUpdateTriIndex(
+  updateOutputDirs: Array<{ outputDir: string; deltaToBase: CoordinateDelta }>,
+  coverage: OsgbBounds[],
+  fillWidth: number,
+  band = 25,
+): UpdateTriIndex | null {
+  const files: B3dmFileEntry[] = []
+  for (const update of updateOutputDirs) {
+    collectB3dmFilesWithBounds(path.join(update.outputDir, 'tileset.json'), update.deltaToBase, files)
+  }
+  if (files.length === 0) return null
+  const distanceMap = buildCoverageDistanceMap(coverage, 2)
+  // 边界带网格单元集合:只读取与边界带相交的 update 瓦片文件,避免全量读取。
+  let bandCells: Set<number> | null = null
+  if (distanceMap) {
+    const maxCells = Math.ceil((band + distanceMap.cellSize * 0.5) / distanceMap.cellSize)
+    bandCells = new Set<number>()
+    for (let i = 0; i < distanceMap.dist.length; i++) {
+      const d = distanceMap.dist[i]!
+      if (isFinite(d) && d !== 0 && Math.abs(d) <= maxCells) bandCells.add(i)
+    }
+  }
+  const fileTouchesBand = (bounds: OsgbBounds): boolean => {
+    if (!distanceMap || !bandCells) return true
+    const c0 = Math.max(0, Math.floor((bounds.minX - distanceMap.minX) / distanceMap.cellSize))
+    const c1 = Math.min(distanceMap.cols - 1, Math.floor((bounds.maxX - distanceMap.minX) / distanceMap.cellSize))
+    const r0 = Math.max(0, Math.floor((bounds.minY - distanceMap.minY) / distanceMap.cellSize))
+    const r1 = Math.min(distanceMap.rows - 1, Math.floor((bounds.maxY - distanceMap.minY) / distanceMap.cellSize))
+    if (c0 > c1 || r0 > r1) return false
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        if (bandCells.has(r * distanceMap.cols + c)) return true
+      }
+    }
+    return false
+  }
+  const minX = Math.min(...files.map((f) => f.bounds.minX))
+  const maxX = Math.max(...files.map((f) => f.bounds.maxX))
+  const minY = Math.min(...files.map((f) => f.bounds.minY))
+  const maxY = Math.max(...files.map((f) => f.bounds.maxY))
+  const cellSize = 10
+  const cols = Math.max(1, Math.ceil((maxX - minX) / cellSize))
+  const rows = Math.max(1, Math.ceil((maxY - minY) / cellSize))
+  const cells: number[][] = Array.from({ length: cols * rows }, () => [])
+  const tris: number[] = []
+
+  for (const file of files) {
+    if (!fileTouchesBand(file.bounds)) continue
+    let buffer: Buffer
+    try { buffer = fs.readFileSync(file.path) } catch { continue }
+    let parts: B3dmParts
+    try { parts = parseB3dmParts(buffer) } catch { continue }
+    let gltf: GltfJson
+    let bin: Buffer
+    try {
+      const parsed = parseGlbParts(parts.glb)
+      gltf = parsed.gltf
+      bin = parsed.bin
+    } catch { continue }
+    for (const mesh of gltf.meshes ?? []) {
+      for (const primitive of mesh.primitives ?? []) {
+        const positionIndex = primitive.attributes?.POSITION
+        const indexIndex = primitive.indices
+        if (positionIndex == null || indexIndex == null) continue
+        const accessor = gltf.accessors?.[positionIndex]
+        const view = accessor?.bufferView != null ? gltf.bufferViews?.[accessor.bufferView] : undefined
+        const indexAccessor = gltf.accessors?.[indexIndex]
+        const indexView = indexAccessor?.bufferView != null ? gltf.bufferViews?.[indexAccessor.bufferView] : undefined
+        if (
+          !accessor || !view || accessor.type !== 'VEC3' || accessor.componentType !== 5126
+          || (view.buffer ?? 0) !== 0
+          || !indexAccessor || !indexView || (indexView.buffer ?? 0) !== 0
+          || (indexAccessor.componentType !== 5125 && indexAccessor.componentType !== 5123)
+        ) continue
+        const stride = accessor.byteStride ?? 12
+        const start = (view.byteOffset ?? 0) + (accessor.byteOffset ?? 0)
+        const positions: Array<[number, number]> = []
+        for (let index = 0; index < (accessor.count ?? 0); index++) {
+          const offset = start + index * stride
+          positions.push([
+            bin.readFloatLE(offset) + file.delta.x,
+            bin.readFloatLE(offset + 4) + file.delta.y,
+          ])
+        }
+        const isUint32 = indexAccessor.componentType === 5125
+        const indexStride = isUint32 ? 4 : 2
+        const indexStart = (indexView.byteOffset ?? 0) + (indexAccessor.byteOffset ?? 0)
+        const indexCount = indexAccessor.count ?? 0
+        for (let index = 0; index + 2 < indexCount; index += 3) {
+          const ia = isUint32
+            ? bin.readUInt32LE(indexStart + index * indexStride)
+            : bin.readUInt16LE(indexStart + index * indexStride)
+          const ib = isUint32
+            ? bin.readUInt32LE(indexStart + (index + 1) * indexStride)
+            : bin.readUInt16LE(indexStart + (index + 1) * indexStride)
+          const ic = isUint32
+            ? bin.readUInt32LE(indexStart + (index + 2) * indexStride)
+            : bin.readUInt16LE(indexStart + (index + 2) * indexStride)
+          const pa = positions[ia]
+          const pb = positions[ib]
+          const pc = positions[ic]
+          if (!pa || !pb || !pc) continue
+          const ax = pa[0]
+          const ay = pa[1]
+          const bx = pb[0]
+          const by = pb[1]
+          const cx = pc[0]
+          const cy = pc[1]
+          // 只保留质心距覆盖区边界 < band 的三角形(边界带)。
+          const centroidX = (ax + bx + cx) / 3
+          const centroidY = (ay + by + cy) / 3
+          const d = queryBoundaryDistanceOrNull(distanceMap, centroidX, centroidY)
+          if (d == null || Math.abs(d) > band) continue
+          // 统一为逆时针后内缩 fillWidth。
+          let t0 = ax, t1 = ay, t2 = bx, t3 = by, t4 = cx, t5 = cy
+          if (cross2D(ax, ay, bx, by, cx, cy) < 0) {
+            t2 = cx; t3 = cy; t4 = bx; t5 = by
+          }
+          // 内缩宽度不能超过三角形内切圆半径的 60%,否则退化。
+          // 微小三角形按内切圆比例内缩,既保证裁剪索引不遗漏贴边三角形,
+          // 又保留一小圈填充带避免边缘出现亚米级裂缝。
+          const side1 = Math.hypot(t2 - t0, t3 - t1)
+          const side2 = Math.hypot(t4 - t2, t5 - t3)
+          const side3 = Math.hypot(t0 - t4, t1 - t5)
+          const semiPerim = (side1 + side2 + side3) / 2
+          const triArea = Math.abs(cross2D(t0, t1, t2, t3, t4, t5)) / 2
+          const inradius = semiPerim > 1e-9 ? triArea / semiPerim : 0
+          const safeWidth = Math.min(fillWidth, Math.max(0, inradius * 0.6))
+          let shrunk: [number, number, number, number, number, number] | null = null
+          if (safeWidth > 1e-4) shrunk = shrinkTriangle2D(t0, t1, t2, t3, t4, t5, safeWidth)
+          // 最后兜底:无法内缩时直接用原三角形参与裁剪。
+          if (!shrunk) shrunk = [t0, t1, t2, t3, t4, t5]
+          if (!shrunk) continue
+          const triIdx = tris.length / 6
+          const sMinX = Math.min(shrunk[0], shrunk[2], shrunk[4])
+          const sMaxX = Math.max(shrunk[0], shrunk[2], shrunk[4])
+          const sMinY = Math.min(shrunk[1], shrunk[3], shrunk[5])
+          const sMaxY = Math.max(shrunk[1], shrunk[3], shrunk[5])
+          const c0 = Math.max(0, Math.floor((sMinX - minX) / cellSize))
+          const c1 = Math.min(cols - 1, Math.floor((sMaxX - minX) / cellSize))
+          const r0 = Math.max(0, Math.floor((sMinY - minY) / cellSize))
+          const r1 = Math.min(rows - 1, Math.floor((sMaxY - minY) / cellSize))
+          for (let r = r0; r <= r1; r++) {
+            for (let c = c0; c <= c1; c++) cells[r * cols + c]!.push(triIdx)
+          }
+          tris.push(shrunk[0], shrunk[1], shrunk[2], shrunk[3], shrunk[4], shrunk[5])
+        }
+      }
+    }
+  }
+  if (tris.length === 0) return null
+  return { minX, minY, cellSize, cols, rows, cells, tris: Float32Array.from(tris), triCount: tris.length / 6 }
+}
+
+// 查询 base 三角形包围盒命中的 update 三角形候选。
+function queryUpdateTriCandidates(
+  triIndex: UpdateTriIndex,
+  minX: number, maxX: number, minY: number, maxY: number,
+): number[] {
+  const c0 = Math.max(0, Math.floor((minX - triIndex.minX) / triIndex.cellSize))
+  const c1 = Math.min(triIndex.cols - 1, Math.floor((maxX - triIndex.minX) / triIndex.cellSize))
+  const r0 = Math.max(0, Math.floor((minY - triIndex.minY) / triIndex.cellSize))
+  const r1 = Math.min(triIndex.rows - 1, Math.floor((maxY - triIndex.minY) / triIndex.cellSize))
+  const seen = new Set<number>()
+  const result: number[] = []
+  for (let r = r0; r <= r1; r++) {
+    for (let c = c0; c <= c1; c++) {
+      const cell = triIndex.cells[r * triIndex.cols + c]
+      if (!cell) continue
+      for (const idx of cell) {
+        if (seen.has(idx)) continue
+        seen.add(idx)
+        result.push(idx)
+      }
+    }
+  }
+  return result
+}
+
+function cutGlbTriangles(glb: Buffer, vectorInput: VectorCutInput): CutGlbResult {
   const { gltf, bin } = parseGlbParts(glb)
   const buffers = gltf.buffers ?? []
   const bufferViews = gltf.bufferViews ?? []
@@ -2490,22 +2906,43 @@ function cutGlbTriangles(glb: Buffer, grid: CoverageGrid): CutGlbResult {
         const p1 = positions[b]!
         const p2 = positions[c]!
 
-        // 三角形 XY 包围盒命中的覆盖区矩形作为裁剪候选。
-        const candidates = coverageCandidatesForTriangle(p0, p1, p2, grid)
+        // 三角形 XY 包围盒命中的覆盖区矩形作为粗分类候选。
+        const candidates = coverageCandidatesForTriangle(p0, p1, p2, vectorInput.coarseGrid)
         if (candidates.size === 0) {
           keptIndices.push(a, b, c)
           continue
         }
 
-        // 三角形逐矩形做减法,得到覆盖区外的凸多边形集合。
-        let polys: PolyVertex[][] = [[
+        // Boundary-band detection: when the triangle bbox hits the update tri index,
+        // skip the 1m rect subtraction and go straight to vector refine. The rect mask
+        // cuts base inside concave gaps between update triangles, while refine only
+        // cuts inward and cannot restore it, causing real holes at the edge.
+        const triBBox: [number, number, number, number] = [
+          Math.min(p0[0], p1[0], p2[0]), Math.min(p0[1], p1[1], p2[1]),
+          Math.max(p0[0], p1[0], p2[0]), Math.max(p0[1], p1[1], p2[1]),
+        ]
+        const updateCands = vectorInput.updateTriIndex
+          ? queryUpdateTriCandidates(vectorInput.updateTriIndex, triBBox[0], triBBox[2], triBBox[1], triBBox[3])
+          : []
+        const useVectorOnly = updateCands.length > 0 && updateCands.length <= 64
+
+
+        const triPoly: PolyVertex[] = [
           { x: p0[0], y: p0[1], z: p0[2], w: [1, 0, 0] },
           { x: p1[0], y: p1[1], z: p1[2], w: [0, 1, 0] },
           { x: p2[0], y: p2[1], z: p2[2], w: [0, 0, 1] },
-        ]]
+        ]
+        let polys: PolyVertex[][] = [triPoly]
         let changed = false
+
+        // 第一步:先用 1m 掩码矩形做减法,保留覆盖区外的部分,
+        // Step 1: subtract the 1m coverage rects, keeping parts outside the area.
+        // Boundary-band triangles (updateCands non-empty) skip this step so the rect
+        // mask cannot cut base inside concave gaps between update triangles.
+        if (!useVectorOnly) {
+        // 避免把跨边界三角形整块误删产生空洞。
         for (const rectIndex of candidates) {
-          const rect = grid.coverage[rectIndex]
+          const rect = vectorInput.coarseGrid.coverage[rectIndex]
           if (!rect) continue
           const next: PolyVertex[][] = []
           for (const poly of polys) {
@@ -2523,6 +2960,84 @@ function cutGlbTriangles(glb: Buffer, grid: CoverageGrid): CutGlbResult {
           }
           polys = next
           if (polys.length === 0) break
+        }
+        } else {
+          // Boundary band goes straight to vector refine; changed stays false so an
+          // untouched triangle is kept whole, while a truly cut one is split.
+          changed = false
+        }
+
+        // 第二步:掩码切出的边界条带再用 update 三角形(已内缩填充带)矢量精修,
+        // 让裁剪线贴合真实几何边缘,避免 1m 矩形掩码在精细 LOD 下留下锯齿/台阶。
+        // 精修只会沿 update 三角形继续向内裁剪,保留的多边形必然在覆盖区外或填充带内,
+        // 因此不再做 pointInCoverage 过滤(过滤会把跨边界三角形整块误删导致空洞)。
+        if ((changed || useVectorOnly) && polys.length > 0 && vectorInput.updateTriIndex) {
+          const refined: PolyVertex[][] = []
+          for (const poly of polys) {
+            let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity
+            for (const v of poly) {
+              if (v.x < mnx) mnx = v.x
+              if (v.x > mxx) mxx = v.x
+              if (v.y < mny) mny = v.y
+              if (v.y > mxy) mxy = v.y
+            }
+            const pieceBBox: [number, number, number, number] = [mnx, mny, mxx, mxy]
+            const cands = queryUpdateTriCandidates(vectorInput.updateTriIndex, mnx, mxx, mny, mxy)
+            if (cands.length === 0) { refined.push(poly); continue }
+            const res = subtractUpdateTrisFromPolys([poly], vectorInput.updateTriIndex, cands, pieceBBox)
+            if (res.changed) changed = true
+            for (const rp of res.polys) refined.push(rp)
+          }
+          polys = refined
+        }
+
+        // 边界带矢量路径跳过了 1m 矩形粗切,精修后的多边形可能仍有部分
+        // 跨入 update 内部(内部没有三角形索引,不会被精修剪掉)。这里用内部区域
+        // 矩形(腐蚀边界带宽度后的覆盖)把内部部分切掉,边界带填充部分保留。
+        if (useVectorOnly && polys.length > 0 && vectorInput.innerGrid) {
+          const cutByInner: PolyVertex[][] = []
+          let innerChanged = false
+          for (const poly of polys) {
+            if (poly.length < 3) continue
+            let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity
+            for (const v of poly) {
+              if (v.x < mnx) mnx = v.x
+              if (v.x > mxx) mxx = v.x
+              if (v.y < mny) mny = v.y
+              if (v.y > mxy) mxy = v.y
+            }
+            // Query rect candidates over the full polygon bbox (not a 3-vertex
+            // sample triangle), so every overlapping inner rect is found.
+            const cands = coverageCandidatesForTriangle(
+              [mnx, mny, 0],
+              [mxx, mny, 0],
+              [mxx, mxy, 0],
+              vectorInput.innerGrid,
+            )
+            let cur: PolyVertex[][] = [poly]
+            for (const rectIndex of cands) {
+              const rect = vectorInput.innerGrid.coverage[rectIndex]
+              if (!rect) continue
+              const next: PolyVertex[][] = []
+              for (const p of cur) {
+                const parts = subtractRectFromConvexPoly(p, rect)
+                if (parts.length === 1 && polygonsSameVertices(parts[0]!, p)) {
+                  next.push(p)
+                } else {
+                  innerChanged = true
+                  next.push(...parts)
+                }
+              }
+              cur = next
+              if (cur.length === 0) break
+            }
+            cutByInner.push(...cur)
+          }
+          polys = cutByInner
+          // The inner cut can trim fragments that the vector refine left
+          // crossing into the update interior; without this flag the final
+          // "unchanged" branch keeps the ORIGINAL uncut triangle.
+          if (innerChanged) changed = true
         }
 
         if (polys.length === 0) {
@@ -2644,7 +3159,7 @@ function cutGlbTriangles(glb: Buffer, grid: CoverageGrid): CutGlbResult {
 }
 
 
-function cutB3dmByCoverage(b3dmPath: string, grid: CoverageGrid): CutB3dmResult {
+function cutB3dmByCoverage(b3dmPath: string, vectorInput: VectorCutInput): CutB3dmResult {
   let original: Buffer
   try {
     original = fs.readFileSync(b3dmPath)
@@ -2657,7 +3172,7 @@ function cutB3dmByCoverage(b3dmPath: string, grid: CoverageGrid): CutB3dmResult 
   } catch {
     return { cutTriangles: 0, totalTriangles: 0, empty: false }
   }
-  const result = cutGlbTriangles(parts.glb, grid)
+  const result = cutGlbTriangles(parts.glb, vectorInput)
   if (result.cutTriangles === 0) {
     return { cutTriangles: 0, totalTriangles: result.totalTriangles, empty: false }
   }
@@ -2747,9 +3262,9 @@ function buildBaseGroundGrid(baseOutputDir: string, coverage: OsgbBounds[], cell
           const x = bin.readFloatLE(offset)
           const y = bin.readFloatLE(offset + 4)
           const vertexZ = bin.readFloatLE(offset + 8)
-          // ????????? band ??? base ??,????? base ?????
-          // ??:5m ?????????? 0~5m ????????,??????????,
-          // ????????????????
+          // Only base vertices near the update band are collected,
+          // median z per 10m cell; boundary cells use median,
+          // avoiding tall objects polluting ground height.
           if (distanceMap) {
             const d = queryCoverageBoundaryDistance(distanceMap, x, y)
             if (d > 8 || (d < 0 && -d > band)) continue
@@ -2809,7 +3324,7 @@ function buildCoverageDistanceMap(coverage: OsgbBounds[], cellSize = 5): Coverag
       for (let c = c0; c <= c1; c++) inside[r * cols + c] = 1
     }
   }
-  // ?????:?? cell ??(?????),?? cell ??(?????)?
+  // Distance map: inside cells use distance to edge, outside negative.
   const dist = new Float32Array(cols * rows).fill(0)
   const queue: number[] = []
   for (let index = 0; index < inside.length; index++) {
@@ -2864,7 +3379,7 @@ function buildCoverageDistanceMap(coverage: OsgbBounds[], cellSize = 5): Coverag
   return { minX, minY, cellSize, cols, rows, dist }
 }
 
-// ?????????????(?);??????:?=????,?=?????
+// Query boundary distance (m); positive=inside, negative=outside.
 function queryCoverageBoundaryDistance(map: CoverageDistanceMap, x: number, y: number): number {
   const column = Math.floor((x - map.minX) / map.cellSize)
   const row = Math.floor((y - map.minY) / map.cellSize)
@@ -2921,7 +3436,7 @@ function blendUpdateBoundaryHeight(
           if (dist < blendWidth) {
             const baseZ = queryGroundZ(groundGrid, px, py)
             if (baseZ != null && isFinite(baseZ)) {
-              // ?????? snapWidth ????? base(??????),??????
+              // Within snapWidth fully snap to base ground (no gap),
               const weight = dist <= snapWidth ? 1 : Math.max(0, 1 - (dist - snapWidth) / (blendWidth - snapWidth))
               newZ = vertexZ + (baseZ - renderZ) * weight
             }
@@ -2955,9 +3470,426 @@ function blendUpdateBoundaryHeight(
   return modifiedVertices
 }
 
+interface UpdateSurfaceIndex {
+  minX: number
+  minY: number
+  cellSize: number
+  cols: number
+  rows: number
+  cells: number[][]
+  tris: Float32Array
+  triCount: number
+}
+
+// Build update surface index (xy grid + z height for lowering),
+// using only boundary-band update geometry.
+function buildUpdateSurfaceIndex(
+  update: { outputDir: string; deltaToBase: CoordinateDelta },
+  coverage: OsgbBounds[],
+  band = 30,
+  dataRoot?: string,
+): UpdateSurfaceIndex | null {
+  const files: B3dmFileEntry[] = []
+  collectB3dmFilesWithBounds(path.join(update.outputDir, 'tileset.json'), update.deltaToBase, files)
+  if (dataRoot && files.length > 0) {
+    // The blend pass rewrites update b3dm files in the copied target dir, which
+    // has no tileset.json of its own. Remap each collected file path to the same
+    // relative location under the copied Data root.
+    for (const file of files) {
+      const rel = path.relative(update.outputDir, file.path)
+      const mapped = path.join(dataRoot, rel.replace(/^Data[\\/]/, ''))
+      if (fs.existsSync(mapped)) file.path = mapped
+    }
+  }
+  if (files.length === 0) return null
+  const distanceMap = buildCoverageDistanceMap(coverage, 2)
+  let bandCells: Set<number> | null = null
+  if (distanceMap) {
+    const maxCells = Math.ceil((band + distanceMap.cellSize * 0.5) / distanceMap.cellSize)
+    bandCells = new Set<number>()
+    for (let i = 0; i < distanceMap.dist.length; i++) {
+      const d = distanceMap.dist[i]!
+      if (isFinite(d) && d !== 0 && Math.abs(d) <= maxCells) bandCells.add(i)
+    }
+  }
+  const boxTouchesBand = (mnx: number, mxx: number, mny: number, mxy: number): boolean => {
+    if (!distanceMap || !bandCells) return true
+    const c0 = Math.max(0, Math.floor((mnx - distanceMap.minX) / distanceMap.cellSize))
+    const c1 = Math.min(distanceMap.cols - 1, Math.floor((mxx - distanceMap.minX) / distanceMap.cellSize))
+    const r0 = Math.max(0, Math.floor((mny - distanceMap.minY) / distanceMap.cellSize))
+    const r1 = Math.min(distanceMap.rows - 1, Math.floor((mxy - distanceMap.minY) / distanceMap.cellSize))
+    if (c0 > c1 || r0 > r1) return false
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        if (bandCells.has(r * distanceMap.cols + c)) return true
+      }
+    }
+    return false
+  }
+  const minX = Math.min(...files.map((f) => f.bounds.minX))
+  const maxX = Math.max(...files.map((f) => f.bounds.maxX))
+  const minY = Math.min(...files.map((f) => f.bounds.minY))
+  const maxY = Math.max(...files.map((f) => f.bounds.maxY))
+  const cellSize = 10
+  const cols = Math.max(1, Math.ceil((maxX - minX) / cellSize))
+  const rows = Math.max(1, Math.ceil((maxY - minY) / cellSize))
+  const cells: number[][] = Array.from({ length: cols * rows }, () => [])
+  const tris: number[] = []
+  for (const file of files) {
+    let buffer: Buffer
+    try { buffer = fs.readFileSync(file.path) } catch { continue }
+    let parts: B3dmParts
+    try { parts = parseB3dmParts(buffer) } catch { continue }
+    let gltf: GltfJson
+    let bin: Buffer
+    try {
+      const parsed = parseGlbParts(parts.glb)
+      gltf = parsed.gltf
+      bin = parsed.bin
+    } catch { continue }
+    for (const mesh of gltf.meshes ?? []) {
+      for (const primitive of mesh.primitives ?? []) {
+        const positionIndex = primitive.attributes?.POSITION
+        const indexIndex = primitive.indices
+        if (positionIndex == null || indexIndex == null) continue
+        const accessor = gltf.accessors?.[positionIndex]
+        const view = accessor?.bufferView != null ? gltf.bufferViews?.[accessor.bufferView] : undefined
+        const indexAccessor = gltf.accessors?.[indexIndex]
+        const indexView = indexAccessor?.bufferView != null ? gltf.bufferViews?.[indexAccessor.bufferView] : undefined
+        if (
+          !accessor || !view || accessor.type !== 'VEC3' || accessor.componentType !== 5126
+          || (view.buffer ?? 0) !== 0
+          || !indexAccessor || !indexView || (indexView.buffer ?? 0) !== 0
+          || (indexAccessor.componentType !== 5125 && indexAccessor.componentType !== 5123)
+        ) continue
+        const stride = accessor.byteStride ?? 12
+        const start = (view.byteOffset ?? 0) + (accessor.byteOffset ?? 0)
+        const positions: Array<[number, number, number]> = []
+        for (let index = 0; index < (accessor.count ?? 0); index++) {
+          const offset = start + index * stride
+          positions.push([
+            bin.readFloatLE(offset) + file.delta.x,
+            bin.readFloatLE(offset + 4) + file.delta.y,
+            bin.readFloatLE(offset + 8) + file.delta.z,
+          ])
+        }
+        const isUint32 = indexAccessor.componentType === 5125
+        const indexStride = isUint32 ? 4 : 2
+        const indexStart = (indexView.byteOffset ?? 0) + (indexAccessor.byteOffset ?? 0)
+        const indexCount = indexAccessor.count ?? 0
+        for (let index = 0; index + 2 < indexCount; index += 3) {
+          const ia = isUint32
+            ? bin.readUInt32LE(indexStart + index * indexStride)
+            : bin.readUInt16LE(indexStart + index * indexStride)
+          const ib = isUint32
+            ? bin.readUInt32LE(indexStart + (index + 1) * indexStride)
+            : bin.readUInt16LE(indexStart + (index + 1) * indexStride)
+          const ic = isUint32
+            ? bin.readUInt32LE(indexStart + (index + 2) * indexStride)
+            : bin.readUInt16LE(indexStart + (index + 2) * indexStride)
+          const pa = positions[ia]
+          const pb = positions[ib]
+          const pc = positions[ic]
+          if (!pa || !pb || !pc) continue
+          const ax = pa[0], ay = pa[1], az = pa[2]
+          const bx = pb[0], by = pb[1], bz = pb[2]
+          const cx = pc[0], cy = pc[1], cz = pc[2]
+          if (Math.abs(cross2D(ax, ay, bx, by, cx, cy)) < 1e-9) continue
+          const mnx = Math.min(ax, bx, cx), mxx = Math.max(ax, bx, cx)
+          const mny = Math.min(ay, by, cy), mxy = Math.max(ay, by, cy)
+          if (!boxTouchesBand(mnx, mxx, mny, mxy)) continue
+          const triIdx = tris.length / 9
+          const c0 = Math.max(0, Math.floor((mnx - minX) / cellSize))
+          const c1 = Math.min(cols - 1, Math.floor((mxx - minX) / cellSize))
+          const r0 = Math.max(0, Math.floor((mny - minY) / cellSize))
+          const r1 = Math.min(rows - 1, Math.floor((mxy - minY) / cellSize))
+          for (let r = r0; r <= r1; r++) {
+            for (let c = c0; c <= c1; c++) cells[r * cols + c]!.push(triIdx)
+          }
+          tris.push(ax, ay, az, bx, by, bz, cx, cy, cz)
+        }
+      }
+    }
+  }
+  if (tris.length === 0) return null
+  return { minX, minY, cellSize, cols, rows, cells, tris: Float32Array.from(tris), triCount: tris.length / 9 }
+}
+
+// Query update surface z at (x,y); null when not covered.
+function queryUpdateSurfaceZ(
+  index: UpdateSurfaceIndex,
+  x: number,
+  y: number,
+): number | null {
+  const column = Math.floor((x - index.minX) / index.cellSize)
+  const row = Math.floor((y - index.minY) / index.cellSize)
+  if (column < 0 || column >= index.cols || row < 0 || row >= index.rows) return null
+  for (const triIdx of index.cells[row * index.cols + column]!) {
+    const base = triIdx * 9
+    const ax = index.tris[base]!, ay = index.tris[base + 1]!, az = index.tris[base + 2]!
+    const bx = index.tris[base + 3]!, by = index.tris[base + 4]!, bz = index.tris[base + 5]!
+    const cx = index.tris[base + 6]!, cy = index.tris[base + 7]!, cz = index.tris[base + 8]!
+    const area2 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    if (Math.abs(area2) < 1e-9) continue
+    const w0 = ((bx - x) * (cy - y) - (by - y) * (cx - x)) / area2
+    const w1 = ((cx - x) * (ay - y) - (cy - y) * (ax - x)) / area2
+    const w2 = 1 - w0 - w1
+    if (w0 >= -1e-6 && w1 >= -1e-6 && w2 >= -1e-6) {
+      return w0 * az + w1 * bz + w2 * cz
+    }
+  }
+  return null
+}
+
+// 构建更新表面高程栅格(每格取最高 z),供 lowerBaseFillBand 把填充带降到更新表面下。
+// 用栅格而不是稀疏三角形索引,避免 update 三角形间隙/band 过滤导致查询不到而残留凸起。
+function buildUpdateSurfaceGrid(
+  update: { outputDir: string; deltaToBase: CoordinateDelta },
+  coverage: OsgbBounds[],
+  dataRoot?: string,
+  cellSize = 1,
+  band = 60,
+): GroundGrid | null {
+  const files: B3dmFileEntry[] = []
+  collectB3dmFilesWithBounds(path.join(update.outputDir, 'tileset.json'), update.deltaToBase, files)
+  if (dataRoot && files.length > 0) {
+    for (const file of files) {
+      const rel = path.relative(update.outputDir, file.path)
+      const mapped = path.join(dataRoot, rel.replace(/^Data[\\/]/, ''))
+      if (fs.existsSync(mapped)) file.path = mapped
+    }
+  }
+  if (files.length === 0) return null
+  const distanceMap = buildCoverageDistanceMap(coverage, 2)
+  let bandCells: Set<number> | null = null
+  if (distanceMap) {
+    const maxCells = Math.ceil((band + distanceMap.cellSize * 0.5) / distanceMap.cellSize)
+    bandCells = new Set<number>()
+    for (let i = 0; i < distanceMap.dist.length; i++) {
+      const d = distanceMap.dist[i]!
+      if (isFinite(d) && d !== 0 && Math.abs(d) <= maxCells) bandCells.add(i)
+    }
+  }
+  const boxTouchesBand = (mnx: number, mxx: number, mny: number, mxy: number): boolean => {
+    if (!distanceMap || !bandCells) return true
+    const c0 = Math.max(0, Math.floor((mnx - distanceMap.minX) / distanceMap.cellSize))
+    const c1 = Math.min(distanceMap.cols - 1, Math.floor((mxx - distanceMap.minX) / distanceMap.cellSize))
+    const r0 = Math.max(0, Math.floor((mny - distanceMap.minY) / distanceMap.cellSize))
+    const r1 = Math.min(distanceMap.rows - 1, Math.floor((mxy - distanceMap.minY) / distanceMap.cellSize))
+    if (c0 > c1 || r0 > r1) return false
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        if (bandCells.has(r * distanceMap.cols + c)) return true
+      }
+    }
+    return false
+  }
+  const minX = Math.min(...files.map((f) => f.bounds.minX)) - band
+  const maxX = Math.max(...files.map((f) => f.bounds.maxX)) + band
+  const minY = Math.min(...files.map((f) => f.bounds.minY)) - band
+  const maxY = Math.max(...files.map((f) => f.bounds.maxY)) + band
+  const cols = Math.max(1, Math.ceil((maxX - minX) / cellSize))
+  const rows = Math.max(1, Math.ceil((maxY - minY) / cellSize))
+  const z = new Float32Array(cols * rows).fill(-Infinity)
+  const has = new Uint8Array(cols * rows)
+  for (const file of files) {
+    let buffer: Buffer
+    try { buffer = fs.readFileSync(file.path) } catch { continue }
+    let parts: B3dmParts
+    try { parts = parseB3dmParts(buffer) } catch { continue }
+    let gltf: GltfJson
+    let bin: Buffer
+    try {
+      const parsed = parseGlbParts(parts.glb)
+      gltf = parsed.gltf
+      bin = parsed.bin
+    } catch { continue }
+    for (const mesh of gltf.meshes ?? []) {
+      for (const primitive of mesh.primitives ?? []) {
+        const positionIndex = primitive.attributes?.POSITION
+        const indexIndex = primitive.indices
+        if (positionIndex == null || indexIndex == null) continue
+        const accessor = gltf.accessors?.[positionIndex]
+        const view = accessor?.bufferView != null ? gltf.bufferViews?.[accessor.bufferView] : undefined
+        const indexAccessor = gltf.accessors?.[indexIndex]
+        const indexView = indexAccessor?.bufferView != null ? gltf.bufferViews?.[indexAccessor.bufferView] : undefined
+        if (
+          !accessor || !view || accessor.type !== 'VEC3' || accessor.componentType !== 5126
+          || (view.buffer ?? 0) !== 0
+          || !indexAccessor || !indexView || (indexView.buffer ?? 0) !== 0
+          || (indexAccessor.componentType !== 5125 && indexAccessor.componentType !== 5123)
+        ) continue
+        const stride = accessor.byteStride ?? 12
+        const start = (view.byteOffset ?? 0) + (accessor.byteOffset ?? 0)
+        const positions: Array<[number, number, number]> = []
+        for (let index = 0; index < (accessor.count ?? 0); index++) {
+          const offset = start + index * stride
+          positions.push([
+            bin.readFloatLE(offset) + file.delta.x,
+            bin.readFloatLE(offset + 4) + file.delta.y,
+            bin.readFloatLE(offset + 8) + file.delta.z,
+          ])
+        }
+        const isUint32 = indexAccessor.componentType === 5125
+        const indexStride = isUint32 ? 4 : 2
+        const indexStart = (indexView.byteOffset ?? 0) + (indexAccessor.byteOffset ?? 0)
+        const indexCount = indexAccessor.count ?? 0
+        for (let index = 0; index + 2 < indexCount; index += 3) {
+          const ia = isUint32
+            ? bin.readUInt32LE(indexStart + index * indexStride)
+            : bin.readUInt16LE(indexStart + index * indexStride)
+          const ib = isUint32
+            ? bin.readUInt32LE(indexStart + (index + 1) * indexStride)
+            : bin.readUInt16LE(indexStart + (index + 1) * indexStride)
+          const ic = isUint32
+            ? bin.readUInt32LE(indexStart + (index + 2) * indexStride)
+            : bin.readUInt16LE(indexStart + (index + 2) * indexStride)
+          const pa = positions[ia]
+          const pb = positions[ib]
+          const pc = positions[ic]
+          if (!pa || !pb || !pc) continue
+          const ax = pa[0], ay = pa[1], az = pa[2]
+          const bx = pb[0], by = pb[1], bz = pb[2]
+          const cx = pc[0], cy = pc[1], cz = pc[2]
+          const area2 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+          if (Math.abs(area2) < 1e-9) continue
+          const mnx = Math.min(ax, bx, cx), mxx = Math.max(ax, bx, cx)
+          const mny = Math.min(ay, by, cy), mxy = Math.max(ay, by, cy)
+          if (!boxTouchesBand(mnx, mxx, mny, mxy)) continue
+          const c0 = Math.max(0, Math.floor((mnx - minX) / cellSize))
+          const c1 = Math.min(cols - 1, Math.floor((mxx - minX) / cellSize))
+          const r0 = Math.max(0, Math.floor((mny - minY) / cellSize))
+          const r1 = Math.min(rows - 1, Math.floor((mxy - minY) / cellSize))
+          for (let row = r0; row <= r1; row++) {
+            const py = minY + (row + 0.5) * cellSize
+            for (let column = c0; column <= c1; column++) {
+              const px = minX + (column + 0.5) * cellSize
+              const w0 = ((bx - px) * (cy - py) - (by - py) * (cx - px)) / area2
+              const w1 = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) / area2
+              const w2 = 1 - w0 - w1
+              if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) continue
+              const cellIndex = row * cols + column
+              const cellZ = w0 * az + w1 * bz + w2 * cz
+              if (!has[cellIndex] || cellZ > z[cellIndex]!) {
+                z[cellIndex] = cellZ
+                has[cellIndex] = 1
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  let any = false
+  for (let i = 0; i < has.length; i++) if (has[i]) { any = true; break }
+  if (!any) return null
+  return { minX, minY, cellSize, cols, rows, z, has }
+}
+
+// Lower base fill-band vertices that sit above the update surface,,
+// so update covers the overlap; base fills gaps update misses.
+function lowerBaseFillBand(
+  outputDir: string,
+  coverage: OsgbBounds[],
+  update: { outputDir: string; deltaToBase: CoordinateDelta },
+  dataRoot?: string,
+  margin = 10,
+): number {
+  if (coverage.length === 0) return 0
+  const surfaceIndex = buildUpdateSurfaceIndex(update, coverage, 60, dataRoot)
+  const surfaceGrid = buildUpdateSurfaceGrid(update, coverage, dataRoot)
+  if (!surfaceIndex && !surfaceGrid) return 0
+  const files: B3dmFileEntry[] = []
+  collectB3dmFilesWithBounds(path.join(outputDir, 'tileset.json'), { x: 0, y: 0, z: 0 }, files)
+  const outerBounds = unionBounds(coverage)
+  if (!outerBounds) return 0
+  const expanded = {
+    minX: outerBounds.minX - margin,
+    maxX: outerBounds.maxX + margin,
+    minY: outerBounds.minY - margin,
+    maxY: outerBounds.maxY + margin,
+    minZ: -Infinity,
+    maxZ: Infinity,
+  }
+  let modifiedVertices = 0
+  for (const file of files) {
+    if (!boundsIntersects(file.bounds, expanded)) continue
+    let original: Buffer
+    try { original = fs.readFileSync(file.path) } catch { continue }
+    let parts: B3dmParts
+    try { parts = parseB3dmParts(original) } catch { continue }
+    const { gltf, bin } = parseGlbParts(parts.glb)
+    let changed = false
+    let minZ = Infinity
+    let maxZ = -Infinity
+    for (const mesh of gltf.meshes ?? []) {
+      for (const primitive of mesh.primitives ?? []) {
+        const positionIndex = primitive.attributes?.POSITION
+        if (positionIndex == null) continue
+        const accessor = gltf.accessors?.[positionIndex]
+        const view = accessor?.bufferView != null ? gltf.bufferViews?.[accessor.bufferView] : undefined
+        if (!accessor || !view || accessor.type !== 'VEC3' || accessor.componentType !== 5126 || (view.buffer ?? 0) !== 0) continue
+        const stride = accessor.byteStride ?? 12
+        const start = (view.byteOffset ?? 0) + (accessor.byteOffset ?? 0)
+        for (let index = 0; index < (accessor.count ?? 0); index++) {
+          const offset = start + index * stride
+          const x = bin.readFloatLE(offset)
+          const y = bin.readFloatLE(offset + 4)
+          const vertexZ = bin.readFloatLE(offset + 8)
+          let newZ = vertexZ
+          // 先精确查询 update 三角形(带 60m 边带),查不到再用 1m 高程栅格兜底,
+          // 避免同一栅格单元内的高位三角形(如屋顶)阻止填充带下压。
+          let updZ: number | null = surfaceIndex ? queryUpdateSurfaceZ(surfaceIndex, x, y) : null
+          if (updZ == null) updZ = surfaceGrid ? queryGroundZ(surfaceGrid, x, y, 8) : null
+          if (updZ != null && isFinite(updZ) && vertexZ > updZ - 0.05) {
+            newZ = updZ - 0.05
+          }
+          if (newZ !== vertexZ) {
+            bin.writeFloatLE(newZ, offset + 8)
+            modifiedVertices++
+            changed = true
+          }
+          if (newZ < minZ) minZ = newZ
+          if (newZ > maxZ) maxZ = newZ
+        }
+      }
+    }
+    if (changed) {
+      for (const mesh of gltf.meshes ?? []) {
+        for (const primitive of mesh.primitives ?? []) {
+          const positionIndex = primitive.attributes?.POSITION
+          if (positionIndex == null) continue
+          const accessor = gltf.accessors?.[positionIndex]
+          if (accessor && accessor.min && accessor.max) {
+            accessor.min = [accessor.min[0], accessor.min[1], minZ]
+            accessor.max = [accessor.max[0], accessor.max[1], maxZ]
+          }
+        }
+      }
+      const glb = buildGlbBuffer(gltf, bin)
+      fs.writeFileSync(file.path, buildB3dmBuffer(parts, glb))
+    }
+  }
+  return modifiedVertices
+}
+
+// 对覆盖行段集合向外膨胀 width 米,用于抵消 1m 栅格量化缝隙,
+// 确保内部区域切割能覆盖到 update 三角形边缘的微小间隙。
+function dilateCoverage(coverage: OsgbBounds[], width: number): OsgbBounds[] {
+  return coverage.map((c) => ({
+    minX: c.minX - width,
+    maxX: c.maxX + width,
+    minY: c.minY - width,
+    maxY: c.maxY + width,
+    minZ: c.minZ,
+    maxZ: c.maxZ,
+  }))
+}
+
 function cutBaseGeometryInCoverage(
   outputDir: string,
   coverage: OsgbBounds[],
+  updateOutputDirs: Array<{ outputDir: string; deltaToBase: CoordinateDelta }>,
   edgeFillWidth = EDGE_BASE_FILL_WIDTH,
 ): CutBaseGeometryResult {
   const rootTilesetPath = path.join(outputDir, 'tileset.json')
@@ -2967,8 +3899,15 @@ function cutBaseGeometryInCoverage(
   // 边缘 base 填充带:覆盖掩码整体腐蚀(边界向内收缩),base 在更新区边缘外
   // 保留一圈与 update 微小重合的填充带,盖住交界处微小缝隙;内部保持连通,
   // 不会在更新区内部重新露出 base(判断相交仍用原始覆盖区)。
-  const cutCoverage = buildEdgeFillCoverage(coverage, edgeFillWidth)
+  const cutCoverage = buildEdgeFillCoverage(coverage, edgeFillWidth + 4)
   const grid = buildCoverageGrid(cutCoverage, 10)
+  const updateTriIndex = buildUpdateTriIndex(updateOutputDirs, coverage, edgeFillWidth)
+  // 内部区域:覆盖掩码只向内腐蚀“填充带 + 2m 余量”,用于矢量路径把跨入
+  // update 内部的多边形切掉(保留边界带填充),避免 3m~25m 死区残留 base 凸起。
+  // 腐蚀后再膨胀 1m,抵消 1m 栅格在 update 三角形边缘的量化缝隙。
+  const innerFillCoverage = dilateCoverage(buildEdgeFillCoverage(coverage, EDGE_BASE_FILL_WIDTH + 4), 1)
+  const innerGrid = buildCoverageGrid(innerFillCoverage, 10)
+  const vectorInput: VectorCutInput = { coarseGrid: grid, updateTriIndex, innerGrid }
   const outerCoverageBounds = unionBounds(coverage)
   const coverageOuterIntersects = (bounds: OsgbBounds): boolean => {
     if (!outerCoverageBounds) return false
@@ -3011,7 +3950,7 @@ function cutBaseGeometryInCoverage(
     if (bounds && uri && !isExternalTileset && coverageOuterIntersects(bounds) && coverageIntersects(bounds, coverage)) {
       const b3dmPath = path.resolve(tilesetDir, uri)
       if (fs.existsSync(b3dmPath)) {
-        const result = cutB3dmByCoverage(b3dmPath, grid)
+        const result = cutB3dmByCoverage(b3dmPath, vectorInput)
         cutTriangles += result.cutTriangles
         if (result.cutTriangles > 0) cutTiles++
         if (result.empty) {
@@ -3190,7 +4129,7 @@ function prepareMergedOutputDirectory(outputDir: string): void {
   }
 }
 
-// ??? Height alignment (stitch update surface onto base surface) ??????
+// Height alignment (stitch update surface onto base surface) below.
 
 interface LeafZPoint {
   x: number
@@ -3347,6 +4286,7 @@ function mergeConvertedTilesets(
   filledHoleCount: number
   cutBaseTiles: number
   cutBaseTriangles: number
+  loweredBaseVertices: number
 } {
   prepareMergedOutputDirectory(outputDir)
 
@@ -3363,10 +4303,15 @@ function mergeConvertedTilesets(
     coverage,
   )
   const outputTilesetPath = path.join(outputDir, 'tileset.json')
-  const pruneResult = pruneTilesetFile(outputTilesetPath, coverage, edgeOptions, undefined, true)
-  // 逐顶点掩码覆盖区:裁剪线贴合 update 实际几何,避免瓦片包围盒悬空造成边界缝隙。
+  // Vertex-based accurate coverage: the cut line follows the real update
+  // geometry so tile bounding boxes do not leave boundary gaps.
   const vertexCoverage = collectVertexCoverageFromTilesets(updateOutputDirs)
-  const cutResult = cutBaseGeometryInCoverage(outputDir, vertexCoverage)
+  // Prune must use the same accurate coverage. Tile bounding boxes are larger
+  // than the real geometry; pruning by bbox deletes base tiles just outside
+  // the update edge and produces holes, so use the accurate mask here too.
+  const pruneResult = pruneTilesetFile(outputTilesetPath, vertexCoverage, edgeOptions, undefined, true)
+  const cutResult = cutBaseGeometryInCoverage(outputDir, vertexCoverage, updateOutputDirs)
+  let loweredBaseVertices = 0
   // 大范围地面高程网格(边界带高程过渡用)。
   const groundGrid = vertexCoverage.length > 0 ? buildBaseGroundGrid(baseOutputDir, vertexCoverage) : null
   const mergedTileset = readJsonFile<TilesetJson>(outputTilesetPath)
@@ -3389,18 +4334,6 @@ function mergeConvertedTilesets(
     if (fs.existsSync(updateDataSourceDir)) {
       fs.cpSync(updateDataSourceDir, updateDataTargetDir, { recursive: true })
     }
-    if (fs.existsSync(updateDataTargetDir) && groundGrid) {
-      // 边界带高程过渡:让 update 边界与 base 地面平滑衔接,消除拼接台阶。
-      blendUpdateBoundaryHeight(
-        updateDataTargetDir,
-        vertexCoverage,
-        update.deltaToBase,
-        heightCorrection,
-        groundGrid,
-      )
-    }
-
-    const graftedTile = cloneTile(updateRoot)
     // The update root has its own top-level georeference. It must be replaced
     // by the base-local delta when grafted under the base root. The z delta is
     // corrected so the update surface stitches onto the base surface instead of
@@ -3409,6 +4342,30 @@ function mergeConvertedTilesets(
       ...update.deltaToBase,
       z: update.deltaToBase.z + heightCorrection,
     }
+    if (fs.existsSync(updateDataTargetDir) && groundGrid) {
+      // Blend update boundary vertices toward base ground,
+      blendUpdateBoundaryHeight(
+        updateDataTargetDir,
+        vertexCoverage,
+        update.deltaToBase,
+        heightCorrection,
+        groundGrid,
+      )
+    }
+    // Lower base fill band after blend so the queried update surface (z
+    // includes heightCorrection) matches the final merge result.
+    loweredBaseVertices += lowerBaseFillBand(
+      outputDir,
+      vertexCoverage,
+      { outputDir: update.outputDir, deltaToBase: graftDelta },
+      updateDataTargetDir,
+    )
+
+    const graftedTile = cloneTile(updateRoot)
+    // The update root has its own top-level georeference. It must be replaced
+    // by the base-local delta when grafted under the base root. The z delta is
+    // corrected so the update surface stitches onto the base surface instead of
+    // floating above or below it.
     graftedTile.transform = makeTranslationTransform(graftDelta)
     normalizeTileBoundingVolume(graftedTile)
     rewriteTileContentUris(graftedTile, updateDataName)
@@ -3435,6 +4392,7 @@ function mergeConvertedTilesets(
     filledHoleCount,
     cutBaseTiles: cutResult.cutTiles,
     cutBaseTriangles: cutResult.cutTriangles,
+    loweredBaseVertices,
   }
 }
 
@@ -3486,7 +4444,7 @@ interface ConversionLogEntry {
   args: unknown[]
 }
 
-// ??? Local database (simple built-in store) ?????????????????????????
+// Local database (simple built-in store) below.
 let db: DatabaseSync | null = null
 
 function getDbPath(): string {
@@ -4182,16 +5140,16 @@ function applyAggregationWithLog(
   if (config.aggregate !== true) return
   const targetMB = config.aggregateTargetMB && config.aggregateTargetMB > 0 ? config.aggregateTargetMB : 30
   const maxMB = config.aggregateMaxMB && config.aggregateMaxMB > 0 ? config.aggregateMaxMB : 100
-  sender.send('conversion-stdout', '?????????????? tile??? LOD?...\n')
+  sender.send('conversion-stdout', '正在聚合瓦片(合并细碎 tile,保留 LOD)...\n')
   try {
     const stats = aggregateTiles(outputDir, { targetMB, maxMB, clean: true })
     sender.send(
       'conversion-stdout',
-      `??????: ${stats.beforeTiles} -> ${stats.afterTiles} ?????? ${stats.reduction.toFixed(1)} ????? ${stats.mergeGroups} ?????? ${stats.cleanedFiles} ???\n`,
+      `聚合完成: ${stats.beforeTiles} -> ${stats.afterTiles} 个瓦片,体积减少 ${stats.reduction.toFixed(1)} 倍,合并 ${stats.mergeGroups} 组,清理 ${stats.cleanedFiles} 个文件\n`,
     )
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    sender.send('conversion-stderr', `??????: ${message}\n`)
+    sender.send('conversion-stderr', `聚合失败: ${message}\n`)
   }
 }
 
@@ -4445,7 +5403,7 @@ async function startConversionFromParams(
 }
 
 // Start conversion
-// ??? Auth / records IPC ??????????????????????????????????????????????
+// Auth / records IPC below.
 ipcMain.handle('auth-login', (_event, username: unknown, password: unknown) => {
   if (!db) return { success: false, error: '数据库未初始化' }
   const row = db.prepare('SELECT id, username, role FROM users WHERE username = ? AND password = ?').get(
