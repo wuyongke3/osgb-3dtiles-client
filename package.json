@@ -35,6 +35,6 @@
     "vue-tsc": "^3.3.3"
   },
   "dependencies": {
-    "cesium": "^1.121.0"
+    "cesium": "^1.144.0"
   }
 }
